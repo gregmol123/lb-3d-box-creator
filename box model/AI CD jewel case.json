@@ -1,0 +1,82 @@
+{
+ "name": "AI_CD_jewel_case",
+ "description": "AI CD jewel case (painted by AI, made with LB 3D Box Creator)",
+ "version": "1.0.0",
+ "author": "LB 3D Box Creator",
+ "template_size": {
+  "width": 1400,
+  "height": 1500
+ },
+ "spine": {
+  "width": 40,
+  "height": 1418
+ },
+ "cover": {
+  "width": 1297,
+  "height": 1416
+ },
+ "spine_quad": {
+  "tl": [
+   10,
+   55
+  ],
+  "tr": [
+   48,
+   41
+  ],
+  "br": [
+   48,
+   1459
+  ],
+  "bl": [
+   10,
+   1445
+  ]
+ },
+ "cover_quad": {
+  "tl": [
+   72,
+   42
+  ],
+  "tr": [
+   1365,
+   148
+  ],
+  "br": [
+   1365,
+   1352
+  ],
+  "bl": [
+   72,
+   1458
+  ]
+ },
+ "spine_source_frac": 0.2,
+ "spine_source": "left",
+ "cover_fit": "stretch",
+ "spine_layout": {
+  "game": {
+   "max_w": 32,
+   "max_h": 454,
+   "center_y": 752,
+   "rotate": -90
+  },
+  "logo_alpha": 0.85
+ },
+ "ai": {
+  "case": "CD jewel case — PS1, Saturn, Mega-CD, PC",
+  "prompt": "studio product photo of an empty clear plastic CD jewel case, three-quarter view with the spine on the left, blank glossy dark cover under a clear plastic sleeve, no print, soft studio lighting, subtle reflections, plain light grey background, sharp focus, photorealistic, high detail",
+  "negative": "text, letters, words, logo, label, artwork, picture on the cover, watermark, signature, hands, person, several objects, cropped, blurry, low resolution, deformed, bent, cartoon, drawing",
+  "model": "juggernautXL_ragnarokBy.safetensors",
+  "seed": 7101,
+  "strength": 0.6,
+  "steps": 28,
+  "cfg": 6.0,
+  "size": [
+   1024,
+   1024
+  ],
+  "server": "ComfyUI 0.36.0",
+  "gloss": 1.0
+ }
+}

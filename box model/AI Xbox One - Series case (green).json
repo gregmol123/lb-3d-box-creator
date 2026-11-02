@@ -1,0 +1,82 @@
+{
+ "name": "AI_Xbox_One_-_Series_case_green",
+ "description": "AI Xbox One - Series case (green) (painted by AI, made with LB 3D Box Creator)",
+ "version": "1.0.0",
+ "author": "LB 3D Box Creator",
+ "template_size": {
+  "width": 1009,
+  "height": 1500
+ },
+ "spine": {
+  "width": 38,
+  "height": 1420
+ },
+ "cover": {
+  "width": 910,
+  "height": 1418
+ },
+ "spine_quad": {
+  "tl": [
+   9,
+   53
+  ],
+  "tr": [
+   45,
+   40
+  ],
+  "br": [
+   45,
+   1460
+  ],
+  "bl": [
+   9,
+   1447
+  ]
+ },
+ "cover_quad": {
+  "tl": [
+   69,
+   41
+  ],
+  "tr": [
+   975,
+   125
+  ],
+  "br": [
+   975,
+   1375
+  ],
+  "bl": [
+   69,
+   1459
+  ]
+ },
+ "spine_source_frac": 0.2,
+ "spine_source": "left",
+ "cover_fit": "stretch",
+ "spine_layout": {
+  "game": {
+   "max_w": 30,
+   "max_h": 454,
+   "center_y": 753,
+   "rotate": -90
+  },
+  "logo_alpha": 0.85
+ },
+ "ai": {
+  "case": "Xbox One / Series case (green)",
+  "prompt": "studio product photo of an empty green plastic Xbox One game case, three-quarter view with the spine on the left, blank glossy dark cover under a clear plastic sleeve, no print, soft studio lighting, subtle reflections, plain light grey background, sharp focus, photorealistic, high detail",
+  "negative": "text, letters, words, logo, label, artwork, picture on the cover, watermark, signature, hands, person, several objects, cropped, blurry, low resolution, deformed, bent, cartoon, drawing, xbox logo, brand logo, emblem, printed symbol",
+  "model": "juggernautXL_ragnarokBy.safetensors",
+  "seed": 7302,
+  "strength": 0.6,
+  "steps": 28,
+  "cfg": 6.0,
+  "size": [
+   896,
+   1216
+  ],
+  "server": "ComfyUI 0.36.0",
+  "gloss": 1.0
+ }
+}

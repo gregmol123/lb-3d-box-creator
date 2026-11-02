@@ -1,0 +1,83 @@
+{
+ "name": "AI_Atari_2600_box_1977",
+ "description": "AI Atari 2600 box (1977) (painted by AI, made with LB 3D Box Creator)",
+ "version": "1.0.0",
+ "author": "LB 3D Box Creator",
+ "template_size": {
+  "width": 988,
+  "height": 1500
+ },
+ "spine": {
+  "width": 125,
+  "height": 1485
+ },
+ "cover": {
+  "width": 860,
+  "height": 1485
+ },
+ "spine_quad": {
+  "tl": [
+   8,
+   52
+  ],
+  "tr": [
+   124,
+   8
+  ],
+  "br": [
+   124,
+   1492
+  ],
+  "bl": [
+   8,
+   1448
+  ]
+ },
+ "cover_quad": {
+  "tl": [
+   124,
+   8
+  ],
+  "tr": [
+   980,
+   93
+  ],
+  "br": [
+   980,
+   1407
+  ],
+  "bl": [
+   124,
+   1492
+  ]
+ },
+ "spine_source_frac": 0.2,
+ "spine_source": "left",
+ "cover_fit": "stretch",
+ "spine_layout": {
+  "game": {
+   "max_w": 100,
+   "max_h": 475,
+   "center_y": 787,
+   "rotate": -90
+  },
+  "logo_alpha": 0.85
+ },
+ "ai": {
+  "case": "Cartridge box (NES, SNES, N64, cardboard)",
+  "from_template": "",
+  "prompt": "studio product photo of an empty vintage 1970s cardboard Atari video game box, three-quarter view with the spine on the left, blank dark unprinted sides, slightly worn edges and corners, no print, soft studio lighting, subtle reflections, plain light grey background, sharp focus, photorealistic, high detail",
+  "negative": "text, letters, words, logo, label, artwork, picture on the cover, watermark, signature, hands, person, several objects, cropped, blurry, low resolution, deformed, bent, cartoon, drawing",
+  "strength": 0.6,
+  "steps": 28,
+  "cfg": 6.0,
+  "size": [
+   832,
+   1216
+  ],
+  "model": "juggernautXL_ragnarokBy.safetensors",
+  "seed": 1977,
+  "server": "ComfyUI 0.36.0",
+  "gloss": 1.0
+ }
+}

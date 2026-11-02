@@ -1,0 +1,82 @@
+{
+ "name": "AI_Wii_case_white",
+ "description": "AI Wii case (white) (painted by AI, made with LB 3D Box Creator)",
+ "version": "1.0.0",
+ "author": "LB 3D Box Creator",
+ "template_size": {
+  "width": 915,
+  "height": 1500
+ },
+ "spine": {
+  "width": 40,
+  "height": 1420
+ },
+ "cover": {
+  "width": 815,
+  "height": 1418
+ },
+ "spine_quad": {
+  "tl": [
+   9,
+   54
+  ],
+  "tr": [
+   46,
+   40
+  ],
+  "br": [
+   46,
+   1460
+  ],
+  "bl": [
+   9,
+   1446
+  ]
+ },
+ "cover_quad": {
+  "tl": [
+   69,
+   41
+  ],
+  "tr": [
+   880,
+   117
+  ],
+  "br": [
+   880,
+   1383
+  ],
+  "bl": [
+   69,
+   1459
+  ]
+ },
+ "spine_source_frac": 0.2,
+ "spine_source": "left",
+ "cover_fit": "stretch",
+ "spine_layout": {
+  "game": {
+   "max_w": 32,
+   "max_h": 454,
+   "center_y": 753,
+   "rotate": -90
+  },
+  "logo_alpha": 0.85
+ },
+ "ai": {
+  "case": "Wii case (white)",
+  "prompt": "studio product photo of an empty white plastic Nintendo Wii game case, three-quarter view with the spine on the left, blank glossy dark cover under a clear plastic sleeve, no print, soft studio lighting, subtle reflections, plain light grey background, sharp focus, photorealistic, high detail",
+  "negative": "text, letters, words, logo, label, artwork, picture on the cover, watermark, signature, hands, person, several objects, cropped, blurry, low resolution, deformed, bent, cartoon, drawing",
+  "model": "juggernautXL_ragnarokBy.safetensors",
+  "seed": 7051,
+  "strength": 0.6,
+  "steps": 28,
+  "cfg": 6.0,
+  "size": [
+   832,
+   1280
+  ],
+  "server": "ComfyUI 0.36.0",
+  "gloss": 1.0
+ }
+}

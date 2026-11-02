@@ -1,0 +1,31 @@
+{
+  "name": "dvd",
+  "description": "DVD case box",
+  "version": "1.0.0",
+  "author": "box3d",
+
+  "template_size": { "width": 633, "height": 907 },
+
+  "spine": { "width": 72, "height": 848 },
+  "cover": { "width": 471, "height": 848 },
+
+  "spine_quad": {
+    "tl": [4,   48], "tr": [72,  26],
+    "br": [72,  878], "bl": [4, 854]
+  },
+  "cover_quad": {
+    "tl": [72,   26], "tr": [544, 106],
+    "br": [544, 798], "bl": [72,  880]
+  },
+
+  "spine_source_frac": 0.20,
+  "spine_source": "left",
+  "cover_fit": "stretch",
+
+  "spine_layout": {
+    "game":   { "max_w": 58, "max_h": 232, "center_y": 453, "rotate": -90 },
+    "top":    { "max_w": 34, "max_h": 40,  "center_y": 150, "rotate": -90 },
+    "bottom": { "max_w": 34, "max_h": 40,  "center_y": 777, "rotate": -90 },
+    "logo_alpha": 0.85
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "name": "mvs",
+  "description": "Neo Geo MVS cartridge box",
+  "version": "1.0.0",
+  "author": "box3d",
+
+  "template_size": { "width": 703, "height": 1000 },
+
+  "spine": { "width": 100, "height": 877 },
+  "cover": { "width": 536, "height": 880 },
+
+  "spine_quad": {
+    "tl": [0,   58], "tr": [100,  92],
+    "br": [100, 998], "bl": [0,  945]
+  },
+  "cover_quad": {
+    "tl": [100,  95], "tr": [638,  42],
+    "br": [638, 922], "bl": [100, 998]
+  },
+
+  "spine_source_frac": 0.20,
+  "spine_source": "left",
+  "cover_fit": "stretch",
+
+  "spine_layout": {
+    "game":   { "max_w": 79,  "max_h": 281, "center_y": 465, "rotate": -90 },
+    "top":    { "max_w": 64,  "max_h": 80,  "center_y": 155, "rotate": -90 },
+    "bottom": { "max_w": 64,  "max_h": 80,  "center_y": 800, "rotate": -90 },
+    "logo_alpha": 0.85
+  }
+}

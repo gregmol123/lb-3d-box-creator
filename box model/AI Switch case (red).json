@@ -1,0 +1,82 @@
+{
+ "name": "AI_Switch_case_red",
+ "description": "AI Switch case (red) (painted by AI, made with LB 3D Box Creator)",
+ "version": "1.0.0",
+ "author": "LB 3D Box Creator",
+ "template_size": {
+  "width": 804,
+  "height": 1500
+ },
+ "spine": {
+  "width": 36,
+  "height": 1420
+ },
+ "cover": {
+  "width": 707,
+  "height": 1418
+ },
+ "spine_quad": {
+  "tl": [
+   8,
+   52
+  ],
+  "tr": [
+   42,
+   40
+  ],
+  "br": [
+   42,
+   1460
+  ],
+  "bl": [
+   8,
+   1448
+  ]
+ },
+ "cover_quad": {
+  "tl": [
+   64,
+   41
+  ],
+  "tr": [
+   768,
+   107
+  ],
+  "br": [
+   768,
+   1393
+  ],
+  "bl": [
+   64,
+   1459
+  ]
+ },
+ "spine_source_frac": 0.2,
+ "spine_source": "left",
+ "cover_fit": "stretch",
+ "spine_layout": {
+  "game": {
+   "max_w": 29,
+   "max_h": 454,
+   "center_y": 753,
+   "rotate": -90
+  },
+  "logo_alpha": 0.85
+ },
+ "ai": {
+  "case": "Switch case (red)",
+  "prompt": "studio product photo of an empty red plastic Nintendo Switch game case, three-quarter view with the spine on the left, blank glossy dark cover under a clear plastic sleeve, no print, soft studio lighting, subtle reflections, plain light grey background, sharp focus, photorealistic, high detail",
+  "negative": "text, letters, words, logo, label, artwork, picture on the cover, watermark, signature, hands, person, several objects, cropped, blurry, low resolution, deformed, bent, cartoon, drawing",
+  "model": "juggernautXL_ragnarokBy.safetensors",
+  "seed": 7071,
+  "strength": 0.6,
+  "steps": 28,
+  "cfg": 6.0,
+  "size": [
+   768,
+   1344
+  ],
+  "server": "ComfyUI 0.36.0",
+  "gloss": 1.0
+ }
+}

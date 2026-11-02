@@ -1,0 +1,11 @@
+# build output (build.bat makes them again)
+build/
+dist/
+*.spec
+lb3d.ico
+__pycache__/
+*.pyc
+selftest.txt
+
+# local example pictures (they use real game covers)
+examples/
