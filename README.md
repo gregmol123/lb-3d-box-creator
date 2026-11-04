@@ -27,8 +27,9 @@ the new pictures into its `Images` folders.
    entries (so platforms that share another platform's folders work).
 2. **Platform** (type part of its name to narrow the list), then a game. The list shows for each game: **Front**
    (✓ Box - Front, ≈ only Box - Front - Reconstructed / Fanart - Box - Front), **Spine** (✓ Box - Spine, F only a
-   Box - Full), **3D** (how many Box - 3D pictures it has). **Show** narrows it to games without / with a Box - 3D or
-   without a front; **Search** by title. Very big platforms show the first 5000 rows (the buttons still work on all).
+   Box - Full), **3D** and **Disc** (how many Box - 3D / Disc pictures it has); a click on a column's name sorts by
+   it. **Show** narrows it to games without / with a Box - 3D, without / with a Disc, or without a front; **Search**
+   by title. Very big platforms show the first 5000 rows (the buttons still work on all).
 3. **Box** tab: the case, chosen per platform.
    * *Box drawn in perspective* (no template): a cardboard box or a plastic keep case (rim colour; presets for
      Xbox 360, PS4, PS2, Wii, Switch…), turn, perspective, thickness (taken from the spine picture's shape when there
@@ -96,11 +97,12 @@ the new pictures into its `Images` folders.
    marked *Only on made-up spines* stay off games that have a real spine picture.
 6. **Disc** tab: the game's disc, from its Box - Front: the kind (*from the platform* by default: PlayStation's black
    disc printed to the hub, DVD for PS2 / Xbox / Wii, Blu-ray for PS3 / PS4 / Xbox One / Wii U, the small GameCube
-   disc, else a CD; or a picture disc printed to the hole), which square of the cover goes on the label (top, middle,
-   bottom) and zoom, the game's Clear Logo (else its Marquee) and its size, a line of text along the edge
+   disc, the PSP's **UMD** — its white shell, round at the top, with the round label and its white middle, as on real
+   UMD scans — else a CD; or a picture disc printed to the hole), which square of the cover goes on the label (top,
+   middle, bottom) and zoom, the game's Clear Logo (else its Marquee) and its size, a line of text along the edge
    (`{title} · © {year} {publisher}`…; fields a game lacks are left out with their separators) at the top or bottom in
-   a colour, the disc's size (1000 px). A game with no Box - Front gets a disc from its generic cover. **Disc** in the
-   preview's view buttons shows it.
+   a colour, the disc's size (1000 px; a UMD is that wide and 2 % higher). A game with no Box - Front gets a disc from
+   its generic cover. **Disc** in the preview's view buttons shows it.
 7. **Save** tab: **What to make** (Box - 3D, Disc or both), **Save this game to LaunchBox**, **Export this game to a
    file…** (the picture shown: the disc in the Disc view), or make them for the selected games / the games in the list
    / the whole platform (in several threads; **Stop** at any time). Before a run the program says how many games it
@@ -159,8 +161,8 @@ height limited (1000 px by default). Files are written to `.tmp` and renamed, so
 pictures. The program never changes LaunchBox's XML files; LaunchBox shows the new pictures after a restart (or an
 image refresh).
 
-Discs go the same way into `<LaunchBox>\Images\<platform>\Disc\` (round PNG with a see-through hole, not cut or
-height-limited). Covers found on the web go into `Box - Front\` as above.
+Discs go the same way into `<LaunchBox>\Images\<platform>\Disc\` (round PNG with a see-through hole, or the UMD's
+shell; not cut or height-limited). Covers found on the web go into `Box - Front\` as above.
 
 Pictures are taken as LaunchBox would: the main folder first, then the game's region folder, then others; a
 Box - Spine only from the front's region folder (can be switched off), Box - Full checked against the front.

@@ -60,9 +60,15 @@ class Kinds(unittest.TestCase):
                                ("Sony Playstation 3", "bluray"), ("Nintendo GameCube", "gamecube"),
                                ("Nintendo Wii", "dvd"), ("Nintendo Wii U", "bluray"), ("Microsoft Xbox", "dvd"),
                                ("Microsoft Xbox 360", "dvd"), ("Microsoft Xbox One", "bluray"), ("Sega Saturn", "cd"),
-                               ("Sega Dreamcast", "cd"), ("", "cd")):
+                               ("Sega Dreamcast", "cd"), ("", "cd"), ("Sony PSP", "umd"), ("Sony PSP Minis", "umd"),
+                               ("Sony PlayStation Portable", "umd"), ("Sony PSP [Translations]", "umd"),
+                               ("Sony Playstation EU", "psx")):
             self.assertEqual(m.disc_kind({"disc_kind": "auto"}, platform), kind, platform)
         self.assertEqual(m.disc_kind({"disc_kind": "picture"}, "Sony Playstation 2"), "picture")
+        self.assertEqual(m.disc_kind({"disc_kind": "umd"}, "Sega Saturn"), "umd")
+        self.assertEqual(set(m.DISC_CHOICES), set(m.DISC_KINDS) | {"umd"})          # every kind is in the Disc tab
+        for kind in m.DISC_CHOICES:
+            self.assertIn("disc_" + kind, m.TEXTS)
         self.assertEqual(m.disc_kind({"disc_kind": "junk"}, "Sony Playstation 2"), "dvd")
         self.assertEqual(m.disc_kind({}, "Sony Playstation 2"), "dvd")
 
@@ -119,6 +125,65 @@ class Kinds(unittest.TestCase):
         self.assertEqual(count(img, red), 0)
         long = disc("cd", disc_text="A very long line of text " * 8, disc_text_color="#ff0000")
         self.assertGreater(count(long, red), 40)                                 # smaller letters, still there
+
+
+class Umd(unittest.TestCase):
+    """The PSP's UMD: a white shell, round at the top, a round label with a white middle and no hole."""
+
+    def px(self, img, x, y):
+        """The pixel at parts of the picture's width."""
+        return img.getpixel((min(img.width - 1, round(x * img.width)), min(img.height - 1, round(y * img.width))))
+
+    def test_shape(self):
+        img = disc("umd")
+        self.assertEqual((img.size, img.mode), ((SIZE, round(SIZE * m.UMD_HEIGHT)), "RGBA"))
+        shell = m.UMD_SHELL
+        for x, y in ((0.0, 0.0), (0.99, 0.0), (0.02, 1.0), (0.98, 1.0), (0.12, 0.12)):    # the round top, the corners
+            self.assertEqual(self.px(img, x, y)[3], 0, (x, y))
+        self.assertTrue(near(self.px(img, 0.5, 0.5), (241, 242, 244), 12))              # a white middle, no hole
+        self.assertEqual(self.px(img, 0.5, 0.5)[3], 255)
+        for x, y in ((0.5 + 0.35, 0.5), (0.5 - 0.35, 0.5), (0.5, 0.5 + 0.35), (0.5, 0.5 - 0.35)):
+            self.assertTrue(near(self.px(img, x, y), ART), (x, y, self.px(img, x, y)))   # the label
+        for x, y in ((0.012, 0.8), (0.988, 0.8), (0.5, 1.0), (0.5, 0.012)):            # white plastic round it
+            pixel = self.px(img, x, y)
+            self.assertTrue(near(pixel, shell, 60) and pixel[3] == 255, (x, y, pixel))
+        self.assertEqual(self.px(img, 0.012, 0.3)[3], 0)                                # the top is round
+        self.assertEqual(self.px(img, 0.012, 0.6)[3], 255)                              # the sides are straight
+        for size in (740, 837, 1000):              # a white cover: nothing dark anywhere (no gaps at the label's edge)
+            white = m.make_disc(Image.new("RGB", (300, 420), (255, 255, 255)), dict(m.default_profile(), disc_kind="umd"),
+                                {}, None, "", size)
+            self.assertEqual(count(white, lambda px: min(px[:3]) < 135), 0, size)
+
+    def test_label(self):
+        art = Image.new("RGB", (300, 600), (220, 20, 20))
+        art.paste((20, 20, 220), (0, 300, 300, 600))                                  # top red, bottom blue
+        img = disc("umd", art, disc_crop="center")
+        self.assertTrue(near(self.px(img, 0.5, 0.15), (220, 20, 20)))
+        self.assertTrue(near(self.px(img, 0.5, 0.85), (20, 20, 220)))
+        self.assertTrue(near(self.px(disc("umd", art, disc_crop="bottom"), 0.5, 0.15), (20, 20, 220)))
+        logo = Image.new("RGBA", (400, 120), (0, 200, 0, 255))
+        prof = dict(m.default_profile(), disc_kind="umd")
+        img = m.make_disc(Image.new("RGB", (300, 420), ART), prof, {}, logo, "", SIZE)
+        green = lambda px: px[1] > 150 and px[0] < 80 and px[2] < 80  # noqa: E731
+        self.assertGreater(count(img, green, (0, 0, SIZE, round(SIZE * 0.28))), 500)   # above the white middle
+        self.assertEqual(count(img, green, (0, round(SIZE * 0.28), SIZE, img.height)), 0)
+        red = lambda px: px[0] > 200 and px[1] < 80 and px[2] < 80  # noqa: E731
+        img = disc("umd", disc_text="{title} · © {year}", disc_text_color="#ff0000")
+        self.assertGreater(count(img, red, (0, round(SIZE * 0.75), SIZE, img.height)), 40)   # along the bottom
+        self.assertEqual(count(img, red, (0, 0, SIZE, round(SIZE * 0.75))), 0)
+
+    def test_from_the_platform_and_generic(self):
+        pics = m.Pictures(Image.new("RGBA", (300, 420), ART + (255,)), None, None, None,
+                          {"title": "Lemmings", "lb_platform": "Sony PSP"}, None)
+        prof = m.default_profile()
+        img = m.render_disc(prof, pics, "Sony PSP", 300)
+        self.assertEqual(img.size, (300, round(300 * m.UMD_HEIGHT)))
+        self.assertTrue(near(self.px(img, 0.85, 0.5), ART))
+        bare = m.Pictures(None, None, None, None, {"title": "Lemmings", "lb_platform": "Sony PSP"}, None)
+        generic = m.render_disc(prof, bare, "Sony PSP", 300)                           # no cover: a generic label
+        self.assertEqual(generic.size, (300, round(300 * m.UMD_HEIGHT)))
+        self.assertFalse(near(self.px(generic, 0.85, 0.5), ART))
+        self.assertEqual(m.render_disc(prof, bare, "Sega Saturn", 300).size, (300, 300))   # a round one elsewhere
 
 
 class GamesDiscs(unittest.TestCase):
@@ -236,6 +301,17 @@ class Window(unittest.TestCase):
         self.assertTrue((self.lb.media_folder(PLATFORM, m.DISC_TYPE) / "Europe" / "First Game-01.png").is_file())
         self.assertTrue((self.lb.media_folder(PLATFORM, m.OUT_TYPE) / "Europe" / "First Game-01.png").is_file())
         self.assertTrue(self.wait(lambda: app.found[0].get("disc")), "disc not noted")
+        self.assertEqual((app.tree.set("0", "disc"), app.tree.set("1", "disc")), ("1", "–"))   # the Disc column
+        self.assertIn("with Disc 1", app.plat_info["text"])
+        for mode, rows in (("hasdisc", ("0",)), ("nodisc", ("1",)), ("all", ("0", "1"))):
+            app.filter_var.set(m.TEXTS["filter_" + mode])
+            app.on_filter_mode()
+            self.assertEqual(app.tree.get_children(), rows, mode)
+        app.sort_by("disc")
+        self.assertEqual(app.tree.get_children(), ("0", "1"))                  # "1" before "–"
+        app.sort_by("disc")
+        self.assertEqual(app.tree.get_children(), ("1", "0"))
+        app.sort_by("title")
         app.cfg["export"]["make_box"] = False
         app.make_boxes("all")                                                 # the generic game's disc only
         self.assertTrue(self.wait(lambda: not app.batch_running), "batch did not finish")

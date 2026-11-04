@@ -41,7 +41,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -50,6 +50,7 @@ MODEL_DIR = APP_DIR / "box model"
 BACKUP_DIR_NAME = "LB 3D Box Creator"
 GENERIC = "*generic*"
 MAX_ROWS = 5000
+COLUMNS = ("title", "region", "front", "spine", "box3d", "disc")     # the game list's columns
 FACES = ("front", "spine")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 FRONT_TYPES = ("Box - Front", "Box - Front - Reconstructed", "Fanart - Box - Front")
@@ -647,7 +648,7 @@ def default_profile() -> dict:
         "upscale": False,          # small covers made sharper with an upscale model (AI window's server)
         "upscale_below": 800,      # ... when less than this many pixels high
         "upscale_model": "",       # "" = the best one the server has
-        "disc_kind": "auto",       # auto | cd | dvd | bluray | psx | gamecube | picture
+        "disc_kind": "auto",       # auto | cd | dvd | bluray | psx | gamecube | umd | picture
         "disc_crop": "center",     # which square of the cover goes on the disc: top | center | bottom
         "disc_zoom": 1.0,
         "disc_logo": True,         # the game's Clear Logo on the disc
@@ -1387,24 +1388,38 @@ DISC_KINDS = {   # kind: (hole radius, where the label starts, colour of the sil
     "gamecube": (0.1875, 0.30, (205, 208, 214)),     # 8 cm disc: a bigger hole for its size
     "picture": (0.125, 0.135, (205, 208, 214)),      # printed right to the hole
 }
-DISC_AUTO = (("gamecube", "gamecube"), ("playstation 3", "bluray"), ("playstation 4", "bluray"),
-             ("playstation 5", "bluray"), ("xbox one", "bluray"), ("xbox series", "bluray"), ("wii u", "bluray"),
-             ("playstation 2", "dvd"), ("xbox", "dvd"), ("wii", "dvd"), ("playstation", "psx"), ("psx", "psx"))
+DISC_CHOICES = ("cd", "dvd", "bluray", "psx", "gamecube", "umd", "picture")   # the Disc tab's order; a UMD isn't round
+DISC_AUTO = (("gamecube", "gamecube"), ("playstation portable", "umd"), ("psp", "umd"), ("playstation 3", "bluray"),
+             ("playstation 4", "bluray"), ("playstation 5", "bluray"), ("xbox one", "bluray"), ("xbox series", "bluray"),
+             ("wii u", "bluray"), ("playstation 2", "dvd"), ("xbox", "dvd"), ("wii", "dvd"), ("playstation", "psx"),
+             ("psx", "psx"))
+# The PSP's UMD seen from its label side: a white shell, round at the top, with a flat curve at the bottom, and a round
+# label with a white middle. Measured on real UMD scans, as parts of the shell's width.
+UMD_HEIGHT = 1.023               # the shell's height
+UMD_BOTTOM = 0.153               # the height of the bottom curve
+UMD_LABEL = 0.472                # the label's radius; its centre is half the width down from the top
+UMD_MIDDLE = 0.22                # the label's white middle
+UMD_SHELL = (238, 240, 243)
 
 
 def disc_kind(profile: dict, platform: str = "") -> str:
-    """The disc's kind: the one chosen, or one from the platform's name (PS2: DVD, PS3: Blu-ray, PS1: black disc…)."""
+    """The disc's kind: the one chosen, or one from the platform's name (PS2: DVD, PS3: Blu-ray, PS1: black disc,
+    PSP: UMD…)."""
     kind = profile.get("disc_kind", "auto")
-    if kind in DISC_KINDS:
+    if kind in DISC_CHOICES:
         return kind
     name = (platform or "").casefold()
     return next((k for word, k in DISC_AUTO if word in name), "cd")
 
 
 def _circle(size: int, radius: float):
-    m = Image.new("L", (size, size), 0)
-    c = size / 2
-    ImageDraw.Draw(m).ellipse((c - radius, c - radius, c + radius, c + radius), fill=255)
+    return _round_mask((size, size), (size / 2, size / 2), radius)
+
+
+def _round_mask(size, centre, radius: float):
+    m = Image.new("L", size, 0)
+    x, y = centre
+    ImageDraw.Draw(m).ellipse((x - radius, y - radius, x + radius, y + radius), fill=255)
     return m
 
 
@@ -1471,29 +1486,101 @@ def tidy_line(text: str) -> str:
         line = new
 
 
+def _put_logo(img, logo, width: float, height: float, centre_y: float) -> None:
+    """The game's logo, centred across the picture with a soft shadow (in place)."""
+    w = img.width
+    pic = _fit(logo, width, height)
+    x, y = (w - pic.width) // 2, max(0, round(centre_y - pic.height / 2))
+    shadow = Image.new("RGBA", pic.size, (0, 0, 0, 0))
+    shadow.putalpha(pic.getchannel("A").filter(ImageFilter.GaussianBlur(w / 260)).point(lambda v: v * 140 // 255))
+    img.alpha_composite(shadow, (x + max(1, w // 400), y + max(1, w // 400)))
+    img.alpha_composite(pic, (x, y))
+
+
+def _gloss(size, mask):
+    """Light falling across a label: a soft bright band, only where `mask` is."""
+    w = size[0]
+    band = Image.new("L", size, 0)
+    ImageDraw.Draw(band).polygon([(0, w * 0.30), (w, w * 0.04), (w, w * 0.16), (0, w * 0.42)], fill=36)
+    shine = Image.new("RGBA", size, (255, 255, 255, 0))
+    shine.putalpha(ImageChops.multiply(band.filter(ImageFilter.GaussianBlur(w / 28)), mask))
+    return shine
+
+
+def umd_outline(w: float, h: float, margin: float = 0.0, steps: int = 90):
+    """The UMD shell's outline on a picture w wide and h high: half a circle at the top, straight sides, and a flat
+    rounded bottom (a superellipse, as on the real shell)."""
+    r = w / 2
+    bottom = w * UMD_BOTTOM
+    top = h - bottom                                 # where the bottom curve starts
+    pts = []
+    for i in range(steps + 1):                       # the top, from left to right
+        t = math.pi + math.pi * i / steps
+        pts.append((r + r * math.cos(t), r + r * math.sin(t)))
+    for i in range(steps + 1):                       # the bottom, from right to left
+        t = math.pi * i / steps
+        c, s = math.cos(t), math.sin(t)
+        pts.append((r + r * math.copysign(abs(c) ** (2 / 1.8), c), top + bottom * abs(s) ** (2 / 1.8)))
+    if margin:
+        sx, sy = (w - 2 * margin) / w, (h - 2 * margin) / h
+        pts = [(margin + x * sx, margin + y * sy) for x, y in pts]
+    return pts
+
+
+def make_umd(art, profile: dict, ctx=None, logo=None, size=None):
+    """A UMD picture (RGBA) printed with `art`: the PSP disc's white shell with its round label, the label's white
+    middle, the game's logo and a line of text along the label's edge. `size` is the shell's width."""
+    s = max(200, int(size or profile.get("disc_size", 1000)))
+    w = s * 2                                        # drawn twice as big for smooth curves
+    h = round(w * UMD_HEIGHT)
+    c, label_r, middle_r = w / 2, w * UMD_LABEL, w * UMD_MIDDLE
+    outline = umd_outline(w, h, w * 0.003)
+    shell = Image.new("L", (w, h), 0)
+    ImageDraw.Draw(shell).polygon(outline, fill=255)
+    img = Image.new("RGBA", (w, h), UMD_SHELL + (255,))
+    shade = Image.linear_gradient("L").resize((w, h)).point(lambda v: v * 50 // 255)       # darker towards the bottom
+    img.paste((196, 201, 209, 255), None, shade)
+    edge = ImageChops.invert(shell.filter(ImageFilter.GaussianBlur(w / 110)))               # a soft rim along the edge
+    img.paste((150, 156, 166, 255), None, edge.point(lambda v: v * 120 // 255))
+    label = _round_mask((w, h), (c, c), label_r)
+    middle = _round_mask((w, h), (c, c), middle_r)
+    img.paste((150, 158, 170, 255), None, ImageChops.subtract(_round_mask((w, h), (c, c), label_r + w * 0.004), label))
+    side = math.ceil(label_r * 2) + 4                # a little over the label, so its edge is covered all round
+    pic = _disc_art(art, side, profile.get("disc_crop", "center"), float(profile.get("disc_zoom", 1.0)))
+    layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    layer.paste(pic, (round(c - side / 2), round(c - side / 2)))
+    img.paste(layer, (0, 0), ImageChops.subtract(label, middle))
+    img.paste((241, 242, 244, 255), None, middle)
+    img.paste((205, 209, 215, 255), None, ImageChops.subtract(middle, _round_mask((w, h), (c, c), middle_r - w * 0.003)))
+    img.alpha_composite(_gloss((w, h), label))
+    if logo is not None:                             # above the white middle, as on real UMDs
+        _put_logo(img, logo, w * float(profile.get("disc_logo_size", 0.55)), w * 0.17, w * 0.165)
+    text = tidy_line(expand_text(profile.get("disc_text", ""), ctx or {}))
+    if text:                                         # the label's centre is half the width down: the ring fits
+        _ring_text(img, text, label_r, hex_rgb(profile.get("disc_text_color", "#ffffff")),
+                   profile.get("disc_text_pos", "bottom"))
+    ImageDraw.Draw(img).line(outline + outline[:1], fill=(178, 183, 191, 255), width=max(2, round(w * 0.004)),
+                             joint="curve")
+    img.putalpha(shell)
+    return img.convert("RGBa").resize((s, round(s * UMD_HEIGHT)), LANCZOS).convert("RGBA")
+
+
 def make_disc(art, profile: dict, ctx=None, logo=None, platform: str = "", size=None):
-    """A disc picture (RGBA, round, transparent hole) printed with `art`."""
+    """A disc picture (RGBA, round, transparent hole) printed with `art`; a UMD picture for the PSP's kind."""
+    kind = disc_kind(profile, platform)
+    if kind == "umd":
+        return make_umd(art, profile, ctx, logo, size)
     s = max(200, int(size or profile.get("disc_size", 1000)))
     w = s * 2                                        # drawn twice as big for smooth circles
     r = w / 2
-    hole, inner, tint = DISC_KINDS[disc_kind(profile, platform)]
+    hole, inner, tint = DISC_KINDS[kind]
     disc = _silver(w, tint)
     label_ring = ImageChops.subtract(_circle(w, r * 0.985), _circle(w, r * inner))
     disc.paste(_disc_art(art, w, profile.get("disc_crop", "center"), float(profile.get("disc_zoom", 1.0))), (0, 0),
                label_ring)
-    gloss = Image.new("L", (w, w), 0)
-    ImageDraw.Draw(gloss).polygon([(0, w * 0.30), (w, w * 0.04), (w, w * 0.16), (0, w * 0.42)], fill=36)
-    gloss = ImageChops.multiply(gloss.filter(ImageFilter.GaussianBlur(w / 28)), label_ring)
-    shine = Image.new("RGBA", (w, w), (255, 255, 255, 0))
-    shine.putalpha(gloss)
-    disc.alpha_composite(shine)
+    disc.alpha_composite(_gloss((w, w), label_ring))
     if logo is not None:
-        pic = _fit(logo, w * float(profile.get("disc_logo_size", 0.55)), r * 0.40)
-        x, y = (w - pic.width) // 2, max(0, round(r - r * 0.64 - pic.height / 2))
-        shadow = Image.new("RGBA", pic.size, (0, 0, 0, 0))
-        shadow.putalpha(pic.getchannel("A").filter(ImageFilter.GaussianBlur(w / 260)).point(lambda v: v * 140 // 255))
-        disc.alpha_composite(shadow, (x + max(1, w // 400), y + max(1, w // 400)))
-        disc.alpha_composite(pic, (x, y))
+        _put_logo(disc, logo, w * float(profile.get("disc_logo_size", 0.55)), r * 0.40, r - r * 0.64)
     text = tidy_line(expand_text(profile.get("disc_text", ""), ctx or {}))
     if text:
         _ring_text(disc, text, r, hex_rgb(profile.get("disc_text_color", "#ffffff")),
@@ -1512,19 +1599,20 @@ def make_disc(art, profile: dict, ctx=None, logo=None, platform: str = "", size=
     return disc.convert("RGBa").resize((s, s), LANCZOS).convert("RGBA")
 
 
-def generic_disc_art(profile: dict, ctx: dict, size: int):
+def generic_disc_art(profile: dict, ctx: dict, size: int, umd: bool = False):
     """The generic cover laid out for a round label: the platform's logo high up, the game's name low down, both kept
-    inside the circle."""
+    inside the circle and off the label's middle (a disc's hub starts at 0.32; a UMD's white middle, at 0.27)."""
     ink = gc_ink(profile)
     img = gc_background((size, size), profile.get("gc_style", "silver"), profile.get("gc_bg", ""),
                         profile.get("gc_picture", ""))
     logo = gc_platform_logo(profile, ctx)
     if logo is None:
         logo = drawn_platform_logo(*gc_names(profile, ctx), ink)
-    logo = _fit(logo, size * 0.50, size * 0.16)        # between the edge and the hub (which starts at 0.32)
-    img.alpha_composite(logo, ((size - logo.width) // 2, round(size * 0.205 - logo.height / 2)))
-    name = _fit(title_picture(ctx.get("title", ""), ink, size * 0.6), size * 0.60, size * 0.13, grow=False)
-    img.alpha_composite(name, ((size - name.width) // 2, round(size * 0.765 - name.height / 2)))
+    (logo_y, logo_h), (name_y, name_h) = ((0.16, 0.15), (0.81, 0.11)) if umd else ((0.205, 0.16), (0.765, 0.13))
+    logo = _fit(logo, size * 0.50, size * logo_h)
+    img.alpha_composite(logo, ((size - logo.width) // 2, round(size * logo_y - logo.height / 2)))
+    name = _fit(title_picture(ctx.get("title", ""), ink, size * 0.6), size * 0.60, size * name_h, grow=False)
+    img.alpha_composite(name, ((size - name.width) // 2, round(size * name_y - name.height / 2)))
     return img
 
 
@@ -1537,8 +1625,9 @@ def render_disc(profile: dict, pics, platform: str = "", size=None):
         if not profile.get("generic_cover", True) or profile["faces"]["front"].get("source") != "launchbox":
             return None
         settings = tuple(str(profile.get(k)) for k in GC_KEYS)
-        art = _memo(("gc-disc", s, pics.ctx.get("title", ""), pics.ctx.get("lb_platform", "")) + settings, None,
-                    lambda: generic_disc_art(profile, pics.ctx, s * 2))
+        umd = disc_kind(profile, platform) == "umd"
+        art = _memo(("gc-disc", s, umd, pics.ctx.get("title", ""), pics.ctx.get("lb_platform", "")) + settings, None,
+                    lambda: generic_disc_art(profile, pics.ctx, s * 2, umd))
         logo = None                                  # the generic label already has the platform's logo
         profile = dict(profile, disc_crop="center", disc_zoom=1.0)
     return make_disc(art, profile, pics.ctx, logo, platform, s)
@@ -3421,12 +3510,14 @@ TEXTS = {
     "lb_section": "LaunchBox", "lb_folder": "LaunchBox folder", "browse": "Browse…", "reload": "↻ Reload",
     "platform": "Platform (type to narrow the list)", "search": "Search games", "show": "Show",
     "filter_all": "All games", "filter_missing": "Without Box - 3D", "filter_has": "With Box - 3D",
-    "filter_nofront": "Without Box - Front",
+    "filter_nofront": "Without Box - Front", "filter_nodisc": "Without Disc", "filter_hasdisc": "With Disc",
     "col_title": "Title", "col_region": "Region", "col_front": "Front", "col_spine": "Spine", "col_3d": "3D",
+    "col_disc": "Disc",
     "count": "{shown} of {total} games", "count_cap": "{shown} of {total} games (first {cap} shown — narrow with search)",
-    "legend": "Front: ✓ Box - Front, ≈ fallback · Spine: ✓ Box - Spine, F Box - Full only · 3D: number of pictures",
+    "legend": "Front: ✓ Box - Front, ≈ fallback · Spine: ✓ Box - Spine, F Box - Full only · 3D, Disc: number of "
+              "pictures",
     "closing": "Finishing the current boxes and closing…", "close_ask": "Boxes are being made. Stop and close the program?",
-    "plat_info": "{games} games · with front {front} · with Box - 3D {has3d}",
+    "plat_info": "{games} games · with front {front} · with Box - 3D {has3d} · with Disc {disc}",
     "loading_platforms": "Loading LaunchBox platforms…", "loading_games": "Loading games: {name}…",
     "platforms_loaded": "LaunchBox: {n} platforms ({root})", "games_loaded": "{name}: {n} games",
     "no_lb": "LaunchBox not found — choose its folder.",
@@ -3547,7 +3638,8 @@ TEXTS = {
     "tab_disc": "Disc", "view_disc": "Disc",
     "disc_kind_section": "1. Kind of disc", "disc_auto": "From the platform (now: {kind})", "disc_cd": "CD, silver centre",
     "disc_dvd": "DVD", "disc_bluray": "Blu-ray, blue silver", "disc_psx": "PlayStation, black, printed to the hub",
-    "disc_gamecube": "GameCube, 8 cm", "disc_picture": "Picture disc, printed to the hole",
+    "disc_gamecube": "GameCube, 8 cm", "disc_umd": "UMD (PSP), white shell",
+    "disc_picture": "Picture disc, printed to the hole",
     "disc_art_section": "2. The picture", "disc_crop": "Part of the cover", "disc_top": "Top", "disc_center": "Middle",
     "disc_bottom": "Bottom", "disc_zoom": "Zoom", "disc_more_section": "3. On the disc",
     "disc_logo": "Game's Clear Logo (else its Marquee)", "disc_logo_size": "Logo size",
@@ -4073,7 +4165,7 @@ class App:
         row = tk.Frame(body2, bg=PANEL2)
         row.pack(fill="x", pady=(6, 0))
         self.label(row, self.t("show")).pack(side="left")
-        self.filter_keys = ["all", "missing", "has", "nofront"]
+        self.filter_keys = ["all", "missing", "has", "nofront", "nodisc", "hasdisc"]
         self.filter_var = tk.StringVar(value=self.t("filter_" + getattr(self, "filter_mode", "all")))
         combo = ttk.Combobox(row, textvariable=self.filter_var, state="readonly",
                              values=[self.t("filter_" + k) for k in self.filter_keys])
@@ -4082,11 +4174,12 @@ class App:
 
         frame = tk.Frame(parent, bg=PANEL)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
-        cols = ("title", "region", "front", "spine", "box3d")
+        cols = COLUMNS
         self.tree = ttk.Treeview(frame, columns=cols, show="headings", selectmode="extended")
         heads = {"title": "col_title", "region": "col_region", "front": "col_front", "spine": "col_spine",
-                 "box3d": "col_3d"}
-        widths = {k: self.px(v) for k, v in {"title": 150, "region": 76, "front": 44, "spine": 54, "box3d": 34}.items()}
+                 "box3d": "col_3d", "disc": "col_disc"}
+        widths = {k: self.px(v) for k, v in {"title": 140, "region": 70, "front": 42, "spine": 46, "box3d": 32,
+                                             "disc": 38}.items()}
         for c in cols:
             self.tree.heading(c, text=self.t(heads[c]), command=lambda c=c: self.sort_by(c))
             self.tree.column(c, width=widths[c], stretch=c == "title", anchor="w" if c in ("title", "region") else "center")
@@ -4529,7 +4622,7 @@ class App:
         var = tk.StringVar()
         self.disc_auto_radio = self.radio(body, "", var, "auto")
         self.disc_auto_radio.pack(fill="x")
-        for kind in DISC_KINDS:
+        for kind in DISC_CHOICES:
             self.radio(body, self.t("disc_" + kind), var, kind).pack(fill="x")
         self.bind_var(var, "profile", "disc_kind", str)
 
@@ -4777,7 +4870,8 @@ class App:
             return
         front = sum(1 for f in self.found.values() if f.get("front"))
         has3d = sum(1 for f in self.found.values() if f.get("box3d"))
-        self.plat_info.configure(text=self.t("plat_info", games=len(self.games), front=front, has3d=has3d))
+        disc = sum(1 for f in self.found.values() if f.get("disc"))
+        self.plat_info.configure(text=self.t("plat_info", games=len(self.games), front=front, has3d=has3d, disc=disc))
         self.update_go_buttons()
 
     # ------------------------------------------------------------------------------------------- game list
@@ -4804,7 +4898,8 @@ class App:
         front = "✓" if f.get("front_type") == FRONT_TYPES[0] else ("≈" if f.get("front") else "–")
         spine = "✓" if f.get("spine") else ("F" if f.get("full") else "–")
         box3d = str(len(f["box3d"])) if f.get("box3d") else "–"
-        return (g.title, g.region, front, spine, box3d)
+        disc = str(len(f["disc"])) if f.get("disc") else "–"
+        return (g.title, g.region, front, spine, box3d, disc)
 
     def apply_filter(self, keep_selection=False):
         self._filter_job = None
@@ -4819,9 +4914,11 @@ class App:
                 continue
             if mode == "nofront" and f.get("front"):
                 continue
+            if mode == "nodisc" and f.get("disc") or mode == "hasdisc" and not f.get("disc"):
+                continue
             rows.append(i)
         col, desc = self.sort
-        index = {"title": 0, "region": 1, "front": 2, "spine": 3, "box3d": 4}[col]
+        index = COLUMNS.index(col)
         rows.sort(key=lambda i: (str(self.row_values(i)[index]).casefold(), self.games[i].title.casefold()),
                   reverse=desc)
         self.rows = rows
@@ -7143,6 +7240,11 @@ def selftest(report: str) -> int:
         check("disc", disc.size == (400, 400) and disc.getpixel((200, 200))[3] == 0 and disc.getpixel((0, 0))[3] == 0
               and disc.getpixel((340, 200))[3] == 255, f"kind {disc_kind(prof, 'Sony Playstation 2')}")
         check("generic disc", render_disc(default_profile(), bare, "", 300).size == (300, 300))
+        umd = render_disc(default_profile(), Pictures(front=front.convert("RGBA"), ctx={"title": "Combat"}),
+                          "Sony PSP", 400)
+        check("UMD", umd.size == (400, round(400 * UMD_HEIGHT)) and umd.getpixel((200, 200))[3] == 255
+              and umd.getpixel((0, 0))[3] == 0 and umd.getpixel((4, umd.height - 4))[3] == 0,
+              f"kind {disc_kind(default_profile(), 'Sony PSP')}")
         names = ["Combat (USA)", "Combat (Europe)", "Combat (USA) (Beta)", "Pac-Man (USA)"]
         check("web title matching", libretro_match("Combat", "Europe", names) == "Combat (Europe)"
               and libretro_match("PacMan", "", names) == "Pac-Man (USA)" and libretro_match("Combat 2", "", names) == ""
