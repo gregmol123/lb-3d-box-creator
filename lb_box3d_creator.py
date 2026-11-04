@@ -28,6 +28,7 @@ import time
 import traceback
 import tkinter as tk
 import tkinter.font as tkfont
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -40,7 +41,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -53,6 +54,7 @@ FACES = ("front", "spine")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
 FRONT_TYPES = ("Box - Front", "Box - Front - Reconstructed", "Fanart - Box - Front")
 SPINE_TYPE, FULL_TYPE, LOGO_TYPE, OUT_TYPE = "Box - Spine", "Box - Full", "Clear Logo", "Box - 3D"
+DISC_TYPE = "Disc"
 MARQUEE_TYPE = "Arcade - Marquee"
 LAYER_KINDS = ("text", "logo", "clearlogo", "marquee")
 RECORD_TAGS = {"Game", "AdditionalApplication", "CustomField", "AlternateName", "GameControllerSupport"}
@@ -640,6 +642,20 @@ def default_profile() -> dict:
         "gc_name": "",             # drawn logo: big name ("" = from the platform's name)
         "gc_title": "title",       # title | logo (the game's Clear Logo, else its title)
         "gc_spine": True,          # black spine with the platform's name when the game has no spine picture
+        "web_covers": "auto",      # no Box - Front: look on the web first (auto | libretro | steam | off)
+        "web_system": "",          # libretro's name of the platform ("" = found from its name)
+        "upscale": False,          # small covers made sharper with an upscale model (AI window's server)
+        "upscale_below": 800,      # ... when less than this many pixels high
+        "upscale_model": "",       # "" = the best one the server has
+        "disc_kind": "auto",       # auto | cd | dvd | bluray | psx | gamecube | picture
+        "disc_crop": "center",     # which square of the cover goes on the disc: top | center | bottom
+        "disc_zoom": 1.0,
+        "disc_logo": True,         # the game's Clear Logo on the disc
+        "disc_logo_size": 0.55,
+        "disc_text": "",           # a line along the edge ({title} {year} {publisher}…)
+        "disc_text_pos": "bottom",
+        "disc_text_color": "#ffffff",
+        "disc_size": 1000,
     }
 
 
@@ -1360,6 +1376,174 @@ def generic_pictures(profile: dict, pics, template=None, quads=None):
     return out
 
 
+# --------------------------------------------------------------------------------------------------------- discs
+# A game's disc for LaunchBox's "Disc" pictures: the cover's art printed on a round label, with the centre hole, the
+# clear hub and the silver ring real discs have, the game's Clear Logo on it and a line of text along the edge.
+DISC_KINDS = {   # kind: (hole radius, where the label starts, colour of the silver), radii as parts of the disc's
+    "cd": (0.125, 0.36, (205, 208, 214)),
+    "dvd": (0.125, 0.30, (205, 208, 214)),
+    "bluray": (0.125, 0.30, (176, 192, 222)),
+    "psx": (0.125, 0.19, (58, 60, 66)),             # PlayStation: black discs, printed to the hub
+    "gamecube": (0.1875, 0.30, (205, 208, 214)),     # 8 cm disc: a bigger hole for its size
+    "picture": (0.125, 0.135, (205, 208, 214)),      # printed right to the hole
+}
+DISC_AUTO = (("gamecube", "gamecube"), ("playstation 3", "bluray"), ("playstation 4", "bluray"),
+             ("playstation 5", "bluray"), ("xbox one", "bluray"), ("xbox series", "bluray"), ("wii u", "bluray"),
+             ("playstation 2", "dvd"), ("xbox", "dvd"), ("wii", "dvd"), ("playstation", "psx"), ("psx", "psx"))
+
+
+def disc_kind(profile: dict, platform: str = "") -> str:
+    """The disc's kind: the one chosen, or one from the platform's name (PS2: DVD, PS3: Blu-ray, PS1: black disc…)."""
+    kind = profile.get("disc_kind", "auto")
+    if kind in DISC_KINDS:
+        return kind
+    name = (platform or "").casefold()
+    return next((k for word, k in DISC_AUTO if word in name), "cd")
+
+
+def _circle(size: int, radius: float):
+    m = Image.new("L", (size, size), 0)
+    c = size / 2
+    ImageDraw.Draw(m).ellipse((c - radius, c - radius, c + radius, c + radius), fill=255)
+    return m
+
+
+def _silver(size: int, tint):
+    """A disc's mirror side: light and dark sectors round the centre, as light falls on a CD."""
+    grey = Image.new("L", (size, size), 0)
+    d = ImageDraw.Draw(grey)
+    for a in range(0, 360, 2):
+        t = math.radians(a)
+        d.pieslice((0, 0, size - 1, size - 1), a, a + 2.5,
+                   fill=int(max(0, min(255, 168 + 58 * math.cos(2 * t) + 18 * math.cos(6 * t + 1.0)))))
+    grey = grey.filter(ImageFilter.GaussianBlur(size / 300))
+    dark = tuple(round(v * 0.35) for v in tint)
+    light = tuple(min(255, round(v * 1.22)) for v in tint)
+    return ImageOps.colorize(grey, dark, light).convert("RGBA")
+
+
+def _disc_art(art, size: int, crop: str = "center", zoom: float = 1.0):
+    """A square of the cover for the round label: its middle (or top, or bottom), zoomed in when asked."""
+    side = min(art.size) / max(1.0, zoom)
+    cx = art.width / 2
+    cy = {"top": side / 2, "bottom": art.height - side / 2}.get(crop, art.height / 2)
+    box = (cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2)
+    return art.convert("RGBA").resize((size, size), LANCZOS, box=box)
+
+
+def _ring_text(img, text: str, radius: float, color, position: str = "bottom") -> None:
+    """A line of text along the disc's edge, reading left to right (in place)."""
+    c = img.width / 2
+    size = radius * 0.055
+    font = load_font("Arial Bold", size)
+    widths = [font.getlength(ch) for ch in text]
+    rr = radius * 0.955 - size * 0.7
+    if sum(widths) / rr > math.pi * 1.5:                  # too long for the edge: smaller letters
+        size *= math.pi * 1.5 * rr / sum(widths)
+        font = load_font("Arial Bold", size)
+        widths = [font.getlength(ch) for ch in text]
+    span = sum(widths) / rr
+    top = position == "top"
+    angle = -math.pi / 2 - span / 2 if top else math.pi / 2 + span / 2
+    step = 1 if top else -1
+    for ch, cw in zip(text, widths):
+        mid = angle + step * (cw / 2) / rr
+        angle += step * cw / rr
+        if not ch.strip():
+            continue
+        glyph = text_picture(ch, font, tuple(color) + (255,), max(1, round(size * 0.06)), (0, 0, 0, 150))
+        turn = -math.degrees(mid + math.pi / 2) if top else math.degrees(math.pi / 2 - mid)
+        glyph = glyph.rotate(turn, BICUBIC, expand=True)
+        x, y = c + rr * math.cos(mid), c + rr * math.sin(mid)
+        img.alpha_composite(glyph, (round(x - glyph.width / 2), round(y - glyph.height / 2)))
+
+
+def tidy_line(text: str) -> str:
+    """A line made of fields, some of them empty ("Combat · © "): no separator or © left at an end or twice in a
+    row."""
+    line = " ".join((text or "").split())
+    while True:
+        new = re.sub(r"[©℗](?=\s+[·•|/–—-](?:\s|$))", "", line)                    # "© ·": a year was empty
+        new = re.sub(r"(?<=\s)([·•|/–—-])(?:\s+[·•|/–—-])+(?=\s|$)", r"\1", " ".join(new.split()))
+        new = re.sub(r"^[·•|/–—,:-]\s*|\s*(?:[·•|/–—,:-]|[©℗])$", "", new).strip()
+        if new == line:
+            return new
+        line = new
+
+
+def make_disc(art, profile: dict, ctx=None, logo=None, platform: str = "", size=None):
+    """A disc picture (RGBA, round, transparent hole) printed with `art`."""
+    s = max(200, int(size or profile.get("disc_size", 1000)))
+    w = s * 2                                        # drawn twice as big for smooth circles
+    r = w / 2
+    hole, inner, tint = DISC_KINDS[disc_kind(profile, platform)]
+    disc = _silver(w, tint)
+    label_ring = ImageChops.subtract(_circle(w, r * 0.985), _circle(w, r * inner))
+    disc.paste(_disc_art(art, w, profile.get("disc_crop", "center"), float(profile.get("disc_zoom", 1.0))), (0, 0),
+               label_ring)
+    gloss = Image.new("L", (w, w), 0)
+    ImageDraw.Draw(gloss).polygon([(0, w * 0.30), (w, w * 0.04), (w, w * 0.16), (0, w * 0.42)], fill=36)
+    gloss = ImageChops.multiply(gloss.filter(ImageFilter.GaussianBlur(w / 28)), label_ring)
+    shine = Image.new("RGBA", (w, w), (255, 255, 255, 0))
+    shine.putalpha(gloss)
+    disc.alpha_composite(shine)
+    if logo is not None:
+        pic = _fit(logo, w * float(profile.get("disc_logo_size", 0.55)), r * 0.40)
+        x, y = (w - pic.width) // 2, max(0, round(r - r * 0.64 - pic.height / 2))
+        shadow = Image.new("RGBA", pic.size, (0, 0, 0, 0))
+        shadow.putalpha(pic.getchannel("A").filter(ImageFilter.GaussianBlur(w / 260)).point(lambda v: v * 140 // 255))
+        disc.alpha_composite(shadow, (x + max(1, w // 400), y + max(1, w // 400)))
+        disc.alpha_composite(pic, (x, y))
+    text = tidy_line(expand_text(profile.get("disc_text", ""), ctx or {}))
+    if text:
+        _ring_text(disc, text, r, hex_rgb(profile.get("disc_text_color", "#ffffff")),
+                   profile.get("disc_text_pos", "bottom"))
+    alpha = _circle(w, r * 0.995)
+    hub = min(0.19, inner)
+    if hub > hole + 0.01:                            # the clear plastic round the hole, with its stacking ring
+        clear = ImageChops.subtract(_circle(w, r * hub), _circle(w, r * hole))
+        disc.paste((226, 231, 238, 255), None, clear)
+        ring = ImageChops.subtract(_circle(w, r * (hole + (hub - hole) * 0.56)),
+                                   _circle(w, r * (hole + (hub - hole) * 0.44)))
+        disc.paste((150, 156, 166, 255), None, ring)
+        alpha = ImageChops.subtract(alpha, clear.point(lambda v: v * 140 // 255))
+    alpha = ImageChops.subtract(alpha, _circle(w, r * hole))
+    disc.putalpha(alpha)
+    return disc.convert("RGBa").resize((s, s), LANCZOS).convert("RGBA")
+
+
+def generic_disc_art(profile: dict, ctx: dict, size: int):
+    """The generic cover laid out for a round label: the platform's logo high up, the game's name low down, both kept
+    inside the circle."""
+    ink = gc_ink(profile)
+    img = gc_background((size, size), profile.get("gc_style", "silver"), profile.get("gc_bg", ""),
+                        profile.get("gc_picture", ""))
+    logo = gc_platform_logo(profile, ctx)
+    if logo is None:
+        logo = drawn_platform_logo(*gc_names(profile, ctx), ink)
+    logo = _fit(logo, size * 0.50, size * 0.16)        # between the edge and the hub (which starts at 0.32)
+    img.alpha_composite(logo, ((size - logo.width) // 2, round(size * 0.205 - logo.height / 2)))
+    name = _fit(title_picture(ctx.get("title", ""), ink, size * 0.6), size * 0.60, size * 0.13, grow=False)
+    img.alpha_composite(name, ((size - name.width) // 2, round(size * 0.765 - name.height / 2)))
+    return img
+
+
+def render_disc(profile: dict, pics, platform: str = "", size=None):
+    """The disc of one game: from its Box - Front, else from a generic cover when those are on; None when neither."""
+    s = max(200, int(size or profile.get("disc_size", 1000)))
+    logo = (pics.logo or pics.marquee) if profile.get("disc_logo", True) else None
+    art = pics.front
+    if art is None:
+        if not profile.get("generic_cover", True) or profile["faces"]["front"].get("source") != "launchbox":
+            return None
+        settings = tuple(str(profile.get(k)) for k in GC_KEYS)
+        art = _memo(("gc-disc", s, pics.ctx.get("title", ""), pics.ctx.get("lb_platform", "")) + settings, None,
+                    lambda: generic_disc_art(profile, pics.ctx, s * 2))
+        logo = None                                  # the generic label already has the platform's logo
+        profile = dict(profile, disc_crop="center", disc_zoom=1.0)
+    return make_disc(art, profile, pics.ctx, logo, platform, s)
+
+
 def case_window(face: str, size, rim_frac: float):
     """Where the art sits inside a keep case's rim on a w x h face: (x0, y0, x1, y1)."""
     w, h = size
@@ -1655,6 +1839,7 @@ class LaunchBox:
         self.platforms: list[str] = []
         self.xml_files: dict[str, str] = {}
         self.folders: dict = {}
+        self.official: dict[str, str] = {}      # platform -> the LaunchBox Games DB name it is scraped as
         self._indexes: dict = {}
         self._lock = threading.Lock()
 
@@ -1669,7 +1854,9 @@ class LaunchBox:
         if platforms_xml.is_file():
             for _, el in ET.iterparse(platforms_xml):
                 if el.tag == "Platform" and el.find("Name") is not None:
-                    names.append((el.findtext("Name") or "").strip())
+                    name = (el.findtext("Name") or "").strip()
+                    names.append(name)
+                    self.official[name] = (el.findtext("ScrapeAs") or "").strip()
                     el.clear()
                 elif el.tag == "PlatformFolder":
                     p, t, f = el.findtext("Platform"), el.findtext("MediaType"), el.findtext("FolderPath")
@@ -1752,6 +1939,7 @@ class LaunchBox:
                 continue
             found[key] = hit[0]
         found["box3d"] = [item[2] for item in self.index(platform, OUT_TYPE).all(game)]
+        found["disc"] = [item[2] for item in self.index(platform, DISC_TYPE).all(game)]
         return found
 
 
@@ -1781,21 +1969,412 @@ def load_pictures(lb: LaunchBox, platform: str, game: Game, profile: dict, found
                 setattr(pics, key, load_picture(path, limit if key not in ("logo", "marquee") else 1600))
             except (OSError, ValueError, Image.DecompressionBombError) as exc:
                 log_line(f"cannot open {path}: {exc}")
+    if pics.front is not None:
+        pics.front = UPSCALER.apply(pics.front, found.get("front"), profile)     # small covers made sharper
     return pics, found
 
 
+# ------------------------------------------------------------------------------------------- covers from the web
+# A game with no Box - Front at all can get its real cover from the web before a generic one is made: libretro's
+# thumbnail collection (box art named after No-Intro / Redump titles, for consoles and home computers) or Steam's
+# library capsule (PC games). A cover found is saved as the game's Box - Front, as LaunchBox's own download would.
+LIBRETRO_URL = "https://thumbnails.libretro.com"
+STEAM_SEARCH = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=US"
+STEAM_ART = ("https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900_2x.jpg",
+             "https://shared.akamai.steamstatic.com/store_item_assets/steam/apps/{id}/library_600x900_2x.jpg",
+             "https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg")
+WEB_MODES = ("auto", "libretro", "steam", "off")
+WEB_AGENT = f"LB3DBoxCreator/{APP_VERSION}"
+CACHE_DIR = Path.home() / ".lb_box3d_creator_cache"
+LIBRETRO_SYSTEMS = {   # LaunchBox Games DB platform names -> libretro's (others are matched by their words)
+    "3do interactive multiplayer": "The 3DO Company - 3DO", "amstrad cpc": "Amstrad - CPC",
+    "amstrad gx4000": "Amstrad - GX4000", "arcade": "MAME", "atari 2600": "Atari - 2600", "atari 5200": "Atari - 5200",
+    "atari 7800": "Atari - 7800", "atari 800": "Atari - 8-bit", "atari xegs": "Atari - 8-bit",
+    "atari jaguar": "Atari - Jaguar", "atari jaguar cd": "Atari - Jaguar", "atari lynx": "Atari - Lynx",
+    "atari st": "Atari - ST", "bandai wonderswan": "Bandai - WonderSwan",
+    "bandai wonderswan color": "Bandai - WonderSwan Color", "coleco colecovision": "Coleco - ColecoVision",
+    "colecovision": "Coleco - ColecoVision", "commodore 64": "Commodore - 64", "commodore amiga": "Commodore - Amiga",
+    "commodore amiga cd32": "Commodore - CD32", "amiga cd32": "Commodore - CD32", "commodore cdtv": "Commodore - CDTV",
+    "commodore pet": "Commodore - PET", "commodore plus 4": "Commodore - Plus-4", "commodore vic-20": "Commodore - VIC-20",
+    "emerson arcadia 2001": "Emerson - Arcadia 2001", "entex adventure vision": "Entex - Adventure Vision",
+    "epoch super cassette vision": "Epoch - Super Cassette Vision", "fairchild channel f": "Fairchild - Channel F",
+    "gce vectrex": "GCE - Vectrex", "magnavox odyssey 2": "Magnavox - Odyssey2", "philips videopac+": "Philips - Videopac+",
+    "mattel intellivision": "Mattel - Intellivision", "microsoft msx": "Microsoft - MSX", "microsoft msx2": "Microsoft - MSX2",
+    "microsoft xbox": "Microsoft - Xbox", "microsoft xbox 360": "Microsoft - Xbox 360", "ms-dos": "DOS",
+    "nec pc-8801": "NEC - PC-8001 - PC-8801", "nec pc-9801": "NEC - PC-98", "nec pc-fx": "NEC - PC-FX",
+    "nec turbografx-16": "NEC - PC Engine - TurboGrafx 16", "nec pc engine": "NEC - PC Engine - TurboGrafx 16",
+    "nec turbografx-cd": "NEC - PC Engine CD - TurboGrafx-CD", "nec pc engine supergrafx": "NEC - PC Engine SuperGrafx",
+    "nec supergrafx": "NEC - PC Engine SuperGrafx", "nintendo 3ds": "Nintendo - Nintendo 3DS",
+    "nintendo 64": "Nintendo - Nintendo 64", "nintendo 64dd": "Nintendo - Nintendo 64DD", "nintendo ds": "Nintendo - Nintendo DS",
+    "nintendo entertainment system": "Nintendo - Nintendo Entertainment System",
+    "nintendo famicom disk system": "Nintendo - Family Computer Disk System", "nintendo game boy": "Nintendo - Game Boy",
+    "nintendo game boy advance": "Nintendo - Game Boy Advance", "nintendo game boy color": "Nintendo - Game Boy Color",
+    "nintendo gamecube": "Nintendo - GameCube", "nintendo pokemon mini": "Nintendo - Pokemon Mini",
+    "nintendo satellaview": "Nintendo - Satellaview", "nintendo sufami turbo": "Nintendo - Sufami Turbo",
+    "super nintendo entertainment system": "Nintendo - Super Nintendo Entertainment System",
+    "nintendo virtual boy": "Nintendo - Virtual Boy", "nintendo wii": "Nintendo - Wii", "nintendo wii u": "Nintendo - Wii U",
+    "philips cd-i": "Philips - CD-i", "rca studio ii": "RCA - Studio II", "sega 32x": "Sega - 32X",
+    "sega cd": "Sega - Mega-CD - Sega CD", "sega dreamcast": "Sega - Dreamcast", "sega game gear": "Sega - Game Gear",
+    "sega genesis": "Sega - Mega Drive - Genesis", "sega mega drive": "Sega - Mega Drive - Genesis",
+    "sega master system": "Sega - Master System - Mark III", "sega naomi": "Sega - Naomi", "sega pico": "Sega - PICO",
+    "sega saturn": "Sega - Saturn", "sega sg-1000": "Sega - SG-1000", "sharp x1": "Sharp - X1",
+    "sharp x68000": "Sharp - X68000", "sinclair zx-81": "Sinclair - ZX 81", "sinclair zx spectrum": "Sinclair - ZX Spectrum",
+    "snk neo geo aes": "SNK - Neo Geo", "snk neo geo mvs": "SNK - Neo Geo", "snk neo geo cd": "SNK - Neo Geo CD",
+    "snk neo geo pocket": "SNK - Neo Geo Pocket", "snk neo geo pocket color": "SNK - Neo Geo Pocket Color",
+    "sony playstation": "Sony - PlayStation", "sony playstation 2": "Sony - PlayStation 2",
+    "sony playstation 3": "Sony - PlayStation 3", "sony playstation 4": "Sony - PlayStation 4",
+    "sony psp": "Sony - PlayStation Portable", "sony playstation vita": "Sony - PlayStation Vita",
+    "spectravideo": "Spectravideo - SVI-318 - SVI-328", "thomson mo/to": "Thomson - MOTO",
+    "tiger game.com": "Tiger - Game.com", "vtech creativision": "VTech - CreatiVision", "vtech v.smile": "VTech - V.Smile",
+    "watara supervision": "Watara - Supervision", "casio pv-1000": "Casio - PV-1000", "casio loopy": "Casio - Loopy",
+    "funtech super acan": "Funtech - Super Acan", "hartung game master": "Hartung - Game Master",
+    "gamepark gp32": "GamePark - GP32", "scummvm": "ScummVM", "sinclair zx81": "Sinclair - ZX 81",
+    "nintendo super game boy": "Nintendo - Game Boy", "nintendo dsi": "Nintendo - Nintendo DSi",
+    "sega naomi 2": "Sega - Naomi 2", "sammy atomiswave": "Atomiswave", "arduboy": "Arduboy Inc - Arduboy",
+    "amiga cdtv": "Commodore - CDTV", "nintendo famicom": "Nintendo - Nintendo Entertainment System",
+    "nintendo super famicom": "Nintendo - Super Nintendo Entertainment System", "sega mark iii":
+    "Sega - Master System - Mark III", "sega mega-cd": "Sega - Mega-CD - Sega CD",
+    "leapfrog leapster": "LeapFrog - Leapster Learning Game System",
+}
+REGION_TAGS = {   # a game's region in LaunchBox: the words of No-Intro / Redump / TOSEC names that fit it, best first
+    "north america": {"usa", "us", "canada", "ca"}, "united states": {"usa", "us"}, "canada": {"canada", "ca", "usa", "us"},
+    "europe": {"europe", "eu", "uk", "gb", "germany", "de", "france", "fr"}, "united kingdom": {"uk", "gb", "europe", "eu"},
+    "germany": {"germany", "de", "europe", "eu"}, "france": {"france", "fr", "europe", "eu"},
+    "spain": {"spain", "es", "europe", "eu"}, "italy": {"italy", "it", "europe", "eu"},
+    "australia": {"australia", "au", "europe", "eu"}, "japan": {"japan", "jp"}, "world": {"world"},
+    "brazil": {"brazil", "br", "usa", "us"}, "korea": {"korea", "kr"}, "asia": {"asia"}}
+REGION_NAMES = {"usa", "europe", "japan", "world", "asia", "korea", "brazil", "canada", "australia", "germany", "france",
+                "spain", "italy", "uk", "netherlands", "sweden", "china", "taiwan", "hong", "kong", "russia", "poland",
+                "scandinavia", "latin", "america", "denmark", "finland", "norway", "portugal", "greece", "unknown"}
+BAD_TAGS = re.compile(r"\b(beta|proto(type)?|demo|sample|hack(ed)?|pirate|promo|kiosk)\b")
+EDITION_WORDS = {"edition", "complete", "definitive", "remastered", "remaster", "enhanced", "legacy", "goty", "game",
+                 "of", "the", "year", "deluxe", "gold", "ultimate", "anniversary", "directors", "director", "cut", "hd",
+                 "special", "classic", "redux", "premium", "standard", "digital", "expanded"}
+_web_lock = threading.Lock()
+_web_next = [0.0]
+_web_down: dict = {}       # host: until when it is not asked again (it did not answer three times in a row)
+WEB_DOWN_SECONDS = 120
+WEB_GAP = 0.25             # seconds between two downloads (four a second at most)
+_cache_lock = threading.Lock()
+_cache_mem: dict = {}
+
+
+def web_get(url: str, timeout: float = 40.0, tries: int = 3) -> bytes:
+    """One download from the web, spaced out (four a second at most) and tried again after a dropped connection;
+    "not found" (urllib.error.HTTPError) comes back at once. A server that does not answer at all is left alone for
+    two minutes, so a batch with no internet does not wait on every game."""
+    host = urllib.parse.urlsplit(url).netloc
+    if _web_down.get(host, 0.0) > time.time():
+        raise OSError(f"{host} did not answer a moment ago")
+    for attempt in range(tries):
+        with _web_lock:
+            wait = _web_next[0] - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            _web_next[0] = time.time() + WEB_GAP
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": WEB_AGENT})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (400, 403, 404, 410) or attempt == tries - 1:
+                raise
+            exc.close()
+        except (OSError, http.client.HTTPException):
+            if attempt == tries - 1:
+                _web_down[host] = time.time() + WEB_DOWN_SECONDS
+                raise
+        time.sleep(1.5 * (attempt + 1))
+    raise OSError("no answer")
+
+
+def _cached_list(name: str, days: float, make, refresh: bool = False) -> list:
+    """A list downloaded once and kept (in memory and in the cache folder) for `days`."""
+    with _cache_lock:
+        if not refresh and name in _cache_mem:
+            return _cache_mem[name]
+        path = CACHE_DIR / name
+        if not refresh:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if time.time() - float(data["time"]) < days * 86400 and isinstance(data["items"], list):
+                    _cache_mem[name] = data["items"]
+                    return data["items"]
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        items = make()
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(json.dumps({"time": time.time(), "items": items}), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            pass
+        _cache_mem[name] = items
+        return items
+
+
+def _listing(url: str) -> list:
+    """The entries of a web server's folder page."""
+    page = web_get(url).decode("utf-8", "replace")
+    return [urllib.parse.unquote(h) for h in re.findall(r'href="([^"?/][^"]*)"', page)]
+
+
+def libretro_systems(refresh: bool = False) -> list:
+    return _cached_list("libretro-systems.json", 14, lambda: [h[:-1] for h in _listing(LIBRETRO_URL + "/")
+                                                              if h.endswith("/")], refresh)
+
+
+def libretro_names(system: str, refresh: bool = False) -> list:
+    """The box art libretro has for a system: its file names without ".png" (No-Intro / Redump style)."""
+    url = f"{LIBRETRO_URL}/{urllib.parse.quote(system)}/Named_Boxarts/"
+    key = re.sub(r"[^A-Za-z0-9]+", "_", system).strip("_")
+
+    def make():
+        try:
+            return [h[:-4] for h in _listing(url) if h.lower().endswith(".png")]
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403, 404, 410):
+                raise
+            exc.close()
+            return []                                 # no such system (or no box art for it): kept as "none"
+
+    return _cached_list(f"libretro-{key}.json", 14, make, refresh)
+
+
+def title_key(title: str) -> str:
+    """A title reduced for matching: lower case, without tags, accents and punctuation, "&" as "and", a moved-back
+    article put first again ("Legend of Zelda, The - A Link to the Past")."""
+    t = re.sub(r"\s*[\[(][^\])]*[\])]", " ", title or "")
+    moved = re.match(r"^(.*?), (The|A|An)\b(.*)$", t, re.IGNORECASE)
+    if moved:
+        t = f"{moved.group(2)} {moved.group(1)}{moved.group(3)}"
+    t = unicodedata.normalize("NFKD", t).encode("ascii", "ignore").decode().casefold().replace("&", " and ")
+    return " ".join(re.sub(r"[^0-9a-z]+", " ", t.replace("'", "")).split())
+
+
+def _region_words(name: str) -> set:
+    """The region words of a No-Intro / Redump / TOSEC name — "(USA, Europe)", "(GB)", "(DE-GB)" — and never the
+    words of a publisher such as "(US Gold)"."""
+    words = set()
+    for tag in re.findall(r"\(([^)]*)\)", name):
+        parts = [p for p in re.split(r"[\s,\-]+", tag.casefold()) if p]
+        if parts and all(p in REGION_NAMES or len(p) == 2 and p.isalpha() for p in parts):
+            words.update(parts)
+    return words
+
+
+def libretro_match(title: str, region: str, names) -> str:
+    """The libretro name for a game: the same title (only spaces and punctuation may differ: a near title can be
+    another game, "Monster Mash" is not "Monster Smash!"), the game's own region first, never a beta or demo when
+    there is a release; "" when there is none."""
+    key = title_key(title)
+    if not key:
+        return ""
+    index = _memo(("libretro-index", id(names)), names, lambda: _key_index(names))
+    hits = index.get(key) or index.get("~" + key.replace(" ", ""), [])
+    if not hits:
+        return ""
+    want = REGION_TAGS.get((region or "").casefold(), set())
+
+    def rank(name):
+        inside = " ".join(re.findall(r"[\[(]([^\])]*)[\])]", name)).casefold()
+        regions = _region_words(name)
+        score = (4 if regions & want else 0) + (2 if "world" in regions else 0) + \
+            (1 if regions & {"usa", "us", "europe", "eu"} else 0) - (6 if BAD_TAGS.search(inside) else 0) - \
+            (1 if "[" in name else 0)
+        return score, -len(name)
+
+    return max(hits, key=rank)
+
+
+def _key_index(names) -> dict:
+    """Names by their title key, and by that key without spaces ("~pacman": "Pac-Man" and "PacMan" are one)."""
+    index: dict = {}
+    for name in names:
+        key = title_key(name)
+        index.setdefault(key, []).append(name)
+        index.setdefault("~" + key.replace(" ", ""), []).append(name)
+    return index
+
+
+def platform_base(platform: str, official: str = "") -> str:
+    """The plain name of a platform: LaunchBox's own (ScrapeAs), else its name, without [tags]."""
+    return re.sub(r"\s*[\[(][^\])]*[\])]", "", official or platform or "").strip()
+
+
+NOT_GAMES = ("manual", "magazine", "book", "catalog", "catalogue", "hardware", "video", "commercial", "comic",
+             "newsletter", "overlay", "artwork", "technical", "bulletin", "flyer", "poster", "soundtrack", "music",
+             "guide", "advert", "scan", "map", "brochure", "documentation", "photo", "wallpaper")
+
+
+def _words(text: str) -> list:
+    return re.findall(r"[0-9a-z]+", (text or "").casefold())
+
+
+def not_games(platform: str) -> bool:
+    """A platform of manuals, magazines, books, videos and the like: their entries are named after games, but a
+    game's box is not their cover, so the web is never asked for them on its own."""
+    return any(w in NOT_GAMES or w.endswith("s") and w[:-1] in NOT_GAMES for w in _words(platform))
+
+
+def libretro_system(platform: str, official: str = "", systems=None) -> str:
+    """libretro's name for a platform: from the table, else the system whose model the platform's name starts with,
+    after its maker or not ("ZX Spectrum - Games" and "Atari 2600/VCS" are "Sinclair - ZX Spectrum" and "Atari -
+    2600"; numbers must agree, so never "Atari - 7800"; "Nintendo Game & Watch" is not "Nintendo - Game Boy", nor
+    "Your 64" a Commodore 64); "" when none fits, and for platforms of manuals, magazines, videos…"""
+    if not_games(platform) or not_games(official):
+        return ""
+    base = platform_base(platform, official)
+    hit = LIBRETRO_SYSTEMS.get(base.casefold())
+    if hit:
+        return hit
+    words = _words(base)
+    numbers = {w for w in words if w.isdigit()}
+    best, best_rank = "", (0, 0.0)
+    for system in systems or sorted(set(LIBRETRO_SYSTEMS.values())):
+        parts = system.split(" - ")
+        sw = set(_words(system))
+        if len(parts) < 2 or numbers - sw:
+            continue                                   # "DOOM", "MAME": only from the table
+        maker = _words(parts[0])
+        for part in parts[1:]:
+            model = _words(part)
+            if model and (words[:len(model)] == model or words[:len(maker) + len(model)] == maker + model):
+                rank = (len(model), len(set(words) & sw) / len(set(words) | sw))     # the fullest model first
+                if rank > best_rank:
+                    best, best_rank = system, rank
+    return best
+
+
+def web_source(platform: str, official: str = "", mode: str = "auto", system: str = "") -> str:
+    """Where a platform's missing covers are looked for on the web, in words ("" = nowhere)."""
+    if mode not in WEB_MODES or mode == "off":
+        return ""
+    places = []
+    if mode in ("auto", "libretro"):
+        system = system or libretro_system(platform, official)
+        if system:
+            places.append(f"libretro: {system}")
+    if mode == "steam" or mode == "auto" and is_pc_platform(platform, official) and not not_games(platform):
+        places.append("Steam")
+    return ", ".join(places)
+
+
+def is_pc_platform(platform: str, official: str = "") -> bool:
+    base = platform_base(platform, official).casefold()
+    return base.startswith(("windows", "microsoft windows", "ms-dos", "dos", "pc games", "steam")) or base == "pc"
+
+
+def steam_cover(title: str):
+    """(picture bytes, ".jpg", where) of a game's portrait cover on Steam (its 600x900 library capsule), or None."""
+    term = cover_title(title)
+    found = json.loads(web_get(STEAM_SEARCH.format(term=urllib.parse.quote(term))).decode("utf-8") or "{}")
+    items = [i for i in found.get("items") or [] if isinstance(i, dict) and i.get("type") == "app" and i.get("id")]
+    key = title_key(term)
+    if not key:
+        return None
+
+    def fit(item):
+        """0 for the same title, the length of an edition's words ("— Remastered", "Enhanced") added, else None."""
+        k = title_key(str(item.get("name") or ""))
+        if k == key or k.replace(" ", "") == key.replace(" ", ""):
+            return 0
+        if k.startswith(key + " ") and set(k[len(key) + 1:].split()) <= EDITION_WORDS:
+            return len(k) - len(key)
+        return None
+
+    ranked = sorted((fit(item), n) for n, item in enumerate(items) if fit(item) is not None)
+    if not ranked:
+        return None
+    pick = items[ranked[0][1]]
+    for url in STEAM_ART:
+        try:
+            data = web_get(url.format(id=int(pick["id"])))
+        except urllib.error.HTTPError as exc:
+            exc.close()
+            continue
+        try:
+            with Image.open(io.BytesIO(data)) as im:
+                if im.height > im.width:
+                    return data, ".jpg", f"Steam: {pick.get('name')} ({pick['id']})"
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+PLATFORM_REGIONS = {"eu": "Europe", "europe": "Europe", "pal": "Europe", "usa": "North America", "us": "North America",
+                    "jp": "Japan", "jap": "Japan", "japan": "Japan"}
+
+
+def platform_region(platform: str) -> str:
+    """The region a platform's name tells ("Sony Playstation EU", "NES [Games][USA]"), for games without their own."""
+    return next((PLATFORM_REGIONS[w] for w in _words(platform) if w in PLATFORM_REGIONS), "")
+
+
+def find_cover_online(platform: str, official: str, game, mode: str = "auto", system: str = ""):
+    """A missing Box - Front from the web: (picture bytes, extension, where it came from), or None."""
+    if mode == "off":
+        return None
+    pc = is_pc_platform(platform, official) and not not_games(platform)
+    if mode in ("auto", "libretro"):
+        system = system or libretro_system(platform, official)
+        if system:
+            name = libretro_match(game.title, game.region or platform_region(platform), libretro_names(system))
+            if name:
+                url = f"{LIBRETRO_URL}/{urllib.parse.quote(system)}/Named_Boxarts/{urllib.parse.quote(name)}.png"
+                return web_get(url), ".png", f"libretro: {system} / {name}"
+    if mode == "steam" or (mode == "auto" and pc):
+        return steam_cover(game.title)
+    return None
+
+
+def save_web_cover(lb: LaunchBox, platform: str, game, data: bytes, ext: str) -> Path:
+    """A cover from the web saved as the game's Box - Front (main folder, LaunchBox's naming, never over a file)."""
+    with Image.open(io.BytesIO(data)) as im:
+        im.verify()                                   # a picture, not an error page
+    folder = lb.media_folder(platform, FRONT_TYPES[0])
+    folder.mkdir(parents=True, exist_ok=True)
+    base, n = clean_name(game.title), 1
+    path = folder / f"{base}-01{ext}"
+    while path.exists():
+        n += 1
+        path = folder / f"{base}-{n:02d}{ext}"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+    lb.index(platform, FRONT_TYPES[0]).add("", str(path))
+    return path
+
+
+def fetch_missing_cover(lb: LaunchBox, platform: str, game, profile: dict, found: dict):
+    """When a game has no Box - Front at all: its cover from the web, saved into LaunchBox, with `found` updated.
+    Returns (path or None, what happened)."""
+    if found.get("front") or profile.get("web_covers", "auto") == "off":
+        return None, ""
+    hit = find_cover_online(platform, lb.official.get(platform, ""), game, profile.get("web_covers", "auto"),
+                            profile.get("web_system", ""))
+    if hit is None:
+        return None, "not found"
+    data, ext, where = hit
+    path = save_web_cover(lb, platform, game, data, ext)
+    found.update(front=str(path), region="", front_type=FRONT_TYPES[0])
+    return path, where
+
+
 # ------------------------------------------------------------------------------------------------ saving to LaunchBox
-def output_target(lb: LaunchBox, platform: str, game: Game, found: dict, export: dict):
-    """Where the new Box - 3D goes: (path, region folder, existing file it replaces or None), or None to skip."""
-    folder = lb.media_folder(platform, OUT_TYPE)
+def output_target(lb: LaunchBox, platform: str, game: Game, found: dict, export: dict, media_type: str = OUT_TYPE):
+    """Where a new Box - 3D (or Disc) goes: (path, region folder, existing file it replaces or None), or None to
+    skip."""
+    folder = lb.media_folder(platform, media_type)
     ext = ".jpg" if export.get("format", "png") == "jpg" else ".png"
     base = clean_name(game.title)
-    existing = found.get("box3d") or []
+    existing = found.get("disc" if media_type == DISC_TYPE else "box3d") or []
     policy = export.get("existing", "skip")
     if existing and policy == "skip":
         return None
     if existing and policy == "replace":
-        hit = lb.index(platform, OUT_TYPE).best(game)     # the picture LaunchBox shows first
+        hit = lb.index(platform, media_type).best(game)     # the picture LaunchBox shows first
         if hit:
             old = Path(hit[0])
             return old.with_suffix(ext), hit[1], [str(old)]
@@ -1822,65 +2401,93 @@ def output_target(lb: LaunchBox, platform: str, game: Game, found: dict, export:
 
 def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, quads: dict, export: dict,
                stop: threading.Event, backup: Path, height: int, progress=None) -> dict:
-    """Make and save the Box - 3D of many games (several threads). Returns counts of what happened ("generic": how
-    many of the saved ones got a generic cover)."""
-    counts = {"saved": 0, "generic": 0, "skipped": 0, "nofront": 0, "errors": 0, "dup": 0}
+    """Make and save the Box - 3D and / or the Disc of many games (several threads). A game with no Box - Front gets
+    its cover from the web first when the settings say so, else a generic cover. Returns counts of what happened."""
+    counts = {"saved": 0, "discs": 0, "covers": 0, "generic": 0, "skipped": 0, "nofront": 0, "errors": 0, "dup": 0}
     targets, lock = set(), threading.Lock()
     fmt = export.get("format", "png")
     max_h = int(export.get("max_height") or 0)
-    lb.index(platform, OUT_TYPE, refresh=True)
+    kinds = [kind for kind, on in ((OUT_TYPE, export.get("make_box", True)), (DISC_TYPE, export.get("make_disc", False)))
+             if on]
+    for kind in kinds:
+        lb.index(platform, kind, refresh=True)
     needs_front = profile["faces"]["front"].get("source") == "launchbox"
+
+    def claim(path):
+        with lock:
+            key = str(path).casefold()
+            if key in targets:
+                return False
+            targets.add(key)
+            return True
 
     def one(game):
         if stop.is_set():
-            return "stopped", game, ""
+            return ["stopped"], game, ""
         try:
             found = lb.find(platform, game, profile)
-            generic = needs_front and not found.get("front")
-            if generic and not profile.get("generic_cover", True):
-                return "nofront", game, ""
-            target = output_target(lb, platform, game, found, export)
-            if target is None:
-                return "skipped", game, ""
-            path, region, replaced = target
-            with lock:
-                key = str(path).casefold()
-                if key in targets:
-                    return "dup", game, ""
-                targets.add(key)
+            plan = [(kind, output_target(lb, platform, game, found, export, kind)) for kind in kinds]
+            plan = [(kind, target) for kind, target in plan if target is not None]
+            if not plan:
+                return ["skipped"], game, ""
+            done_here, info = [], ""
+            if needs_front and not found.get("front"):
+                try:
+                    cover, info = fetch_missing_cover(lb, platform, game, profile, found)
+                except (OSError, ValueError, http.client.HTTPException) as exc:    # the web is out of reach
+                    cover, info = None, f"{TEXTS['web_failed']}: {exc}"
+                if cover is not None:
+                    done_here.append("covers")
+                elif profile.get("generic_cover", True):
+                    done_here.append("generic")
+                else:
+                    return ["nofront"], game, info
             pics, _ = load_pictures(lb, platform, game, profile, found)
-            img, _ = render_box(profile, template, quads, pics, height=height)
-            out = finish_picture(img, max_h, bool(export.get("trim", True)), fmt, export.get("jpg_bg", "#ffffff"))
-            save_picture(out, path, replaced, backup if replaced else None, lb.root, fmt)
-            lb.index(platform, OUT_TYPE).add(region, str(path))
-            return "generic" if generic else "saved", game, str(path)
+            for kind, (path, region, replaced) in plan:
+                if not claim(path):
+                    done_here.append("dup")
+                    continue
+                if kind == DISC_TYPE:
+                    img = render_disc(profile, pics, platform)
+                    if img is None:
+                        continue
+                    out = finish_picture(img, 0, False, fmt, export.get("jpg_bg", "#ffffff"))
+                else:
+                    img, _ = render_box(profile, template, quads, pics, height=height)
+                    out = finish_picture(img, max_h, bool(export.get("trim", True)), fmt,
+                                         export.get("jpg_bg", "#ffffff"))
+                save_picture(out, path, replaced, backup if replaced else None, lb.root, fmt)
+                lb.index(platform, kind).add(region, str(path))
+                done_here.append("discs" if kind == DISC_TYPE else "saved")
+            return done_here, game, info
         except Exception as exc:  # noqa: BLE001 - one bad picture must not stop the rest
             log_line(f"{game.title}: {traceback.format_exc()}")
-            return "errors", game, f"{type(exc).__name__}: {exc}"
+            return ["errors"], game, f"{type(exc).__name__}: {exc}"
 
-    done = in_a_row = 0
+    done = in_a_row = made_games = error_games = 0
     aborted = ""
     threads = max(1, min(16, int(export.get("threads") or 1)))
     with ThreadPoolExecutor(max_workers=threads) as pool:
         futures = [pool.submit(one, g) for g in games]
         for fut in as_completed(futures):
-            status, game, info = fut.result()
+            happened, game, info = fut.result()
             done += 1
-            if status == "generic":
-                counts["generic"] += 1
-                status = "saved"
-            if status in counts:
-                counts[status] += 1
-            # box3d's circuit breaker: something is wrong (disk full, folder gone...) when boxes keep failing
-            if status == "errors":
+            for what in happened:
+                if what in counts:
+                    counts[what] += 1
+            # box3d's circuit breaker: something is wrong (disk full, folder gone...) when games keep failing
+            if "errors" in happened:
                 in_a_row += 1
-            elif status == "saved":
+                error_games += 1
+            elif "saved" in happened or "discs" in happened:
                 in_a_row = 0
-            tried = counts["saved"] + counts["errors"]
-            if not aborted and (in_a_row >= ABORT_IN_A_ROW or tried >= 10 and counts["errors"] > ABORT_SHARE * tried):
+                made_games += 1
+            tried = made_games + error_games
+            if not aborted and (in_a_row >= ABORT_IN_A_ROW or tried >= 10 and error_games > ABORT_SHARE * tried):
                 aborted = "in_a_row" if in_a_row >= ABORT_IN_A_ROW else "share"
                 stop.set()
             if progress is not None:
+                status = "errors" if "errors" in happened else (happened[0] if happened else "")
                 progress(done, len(games), counts, status, game, info)
     counts["aborted"] = aborted
     return counts
@@ -1889,15 +2496,19 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
 ABORT_IN_A_ROW, ABORT_SHARE = 10, 0.20
 
 
-def batch_plan(found_list, existing: str = "skip", need_front: bool = True, generic: bool = False):
-    """What a run would do: (boxes to make, games skipped as they have a Box - 3D, games left out as they have no
-    Box - Front, boxes that get a generic cover)."""
+def batch_plan(found_list, existing: str = "skip", need_front: bool = True, generic: bool = False,
+               kinds=(OUT_TYPE,), web: bool = False):
+    """What a run would do: (games to make something for, games skipped as all they need is there, games left out
+    as they have no Box - Front, games among those to make that have no Box - Front: a cover from the web or a
+    generic one)."""
     make = skip = nofront = covers = 0
     for found in found_list:
         missing = need_front and not found.get("front")
-        if missing and not generic:
+        if missing and not (generic or web):
             nofront += 1
-        elif found.get("box3d") and existing == "skip":
+            continue
+        todo = [k for k in kinds if not (existing == "skip" and found.get("disc" if k == DISC_TYPE else "box3d"))]
+        if not todo:
             skip += 1
         else:
             make += 1
@@ -2576,18 +3187,58 @@ class AIServer:
             if conn is not None:
                 conn.close()
 
-    def _comfy(self, guide, prompt, negative, model, strength, steps, cfg, seed, progress, stop):
-        if not model:
-            raise AIError(TEXTS["ai_no_model"])
-        body, ctype = _multipart({"overwrite": "true", "type": "input"},
-                                 {"image": ("lb3d_guide.png", _png_bytes(guide), "image/png")})
+    def _comfy_upload(self, img, name: str) -> str:
+        """A picture put into ComfyUI's input folder (overwriting this program's own file); its name there."""
+        body, ctype = _multipart({"overwrite": "true", "type": "input"}, {"image": (name, _png_bytes(img), "image/png")})
         try:
             sent = json.loads(_http(self.url + "/upload/image", body, 60, {"Content-Type": ctype}).decode("utf-8"))
         except (OSError, ValueError) as exc:
             raise AIError(_server_error(exc)) from exc
-        image = str(sent.get("name") or "lb3d_guide.png") if isinstance(sent, dict) else "lb3d_guide.png"
+        image = str(sent.get("name") or name) if isinstance(sent, dict) else name
         if isinstance(sent, dict) and sent.get("subfolder"):
             image = f"{sent['subfolder']}/{image}"
+        return image
+
+    def upscalers(self) -> list:
+        """The upscale models (ESRGAN and the like) the server can use."""
+        if self.kind == "comfy":
+            info = self.call("/object_info/UpscaleModelLoader") or {}
+            try:
+                spec = info["UpscaleModelLoader"]["input"]["required"]["model_name"]
+            except (KeyError, TypeError):
+                return []
+            names = []
+            if isinstance(spec, list) and spec:
+                if isinstance(spec[0], list):                               # [[names], {...}]
+                    names = spec[0]
+                elif len(spec) > 1 and isinstance(spec[1], dict):           # ["COMBO", {"options": [names]}]
+                    names = spec[1].get("options") or []
+            return [str(n) for n in names]
+        items = self.call("/sdapi/v1/upscalers") or []
+        return [str(u.get("name")) for u in items if isinstance(u, dict) and u.get("name") not in
+                (None, "None", "Lanczos", "Nearest")]
+
+    def upscale(self, img, model: str, scale: float = 4.0):
+        """A picture made bigger and sharper by an upscale model (the server's own resize to `scale`)."""
+        if self.kind == "comfy":
+            image = self._comfy_upload(img.convert("RGB"), "lb3d_upscale.png")
+            graph = {"1": {"class_type": "LoadImage", "inputs": {"image": image}},
+                     "2": {"class_type": "UpscaleModelLoader", "inputs": {"model_name": model}},
+                     "3": {"class_type": "ImageUpscaleWithModel", "inputs": {"upscale_model": ["2", 0], "image": ["1", 0]}},
+                     "4": {"class_type": "PreviewImage", "inputs": {"images": ["3", 0]}}}
+            return self._comfy_run(graph, None, None)
+        payload = {"image": base64.b64encode(_png_bytes(img.convert("RGB"))).decode("ascii"), "resize_mode": 0,
+                   "upscaling_resize": float(scale), "upscaler_1": model, "show_extras_results": True}
+        answer = self.call("/sdapi/v1/extra-single-image", payload, timeout=900)
+        picture = _b64_picture((answer or {}).get("image") if isinstance(answer, dict) else None)
+        if picture is None:
+            raise AIError("the server sent no picture")
+        return picture
+
+    def _comfy(self, guide, prompt, negative, model, strength, steps, cfg, seed, progress, stop):
+        if not model:
+            raise AIError(TEXTS["ai_no_model"])
+        image = self._comfy_upload(guide, "lb3d_guide.png")
         sampler, scheduler = self.sampler_for(model)
         graph = {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": model}},
@@ -2603,6 +3254,10 @@ class AIServer:
             "7": {"class_type": "VAEDecode", "inputs": {"samples": ["6", 0], "vae": ["1", 2]}},
             "8": {"class_type": "PreviewImage", "inputs": {"images": ["7", 0]}},
         }
+        return self._comfy_run(graph, progress, stop)
+
+    def _comfy_run(self, graph: dict, progress=None, stop=None):
+        """Queue a ComfyUI job and wait for its first picture."""
         queued = self.call("/prompt", {"prompt": graph, "client_id": self.client_id}, timeout=60) or {}
         pid = self.prompt_id = str(queued.get("prompt_id") or "") if isinstance(queued, dict) else ""
         if not pid:
@@ -2652,6 +3307,110 @@ class AIServer:
             pass
 
 
+UPSCALE_WANTED = ("ultrasharp", "realesrgan_x4plus", "realesrgan x4plus", "r-esrgan 4x+", "remacri", "4x_nmkd",
+                  "esrgan_4x", "swinir", "4x", "x4")
+
+
+def pick_upscaler(names, wanted: str = "") -> str:
+    """The upscale model to use: the one chosen, else a good photo one (never an anime one), else the first."""
+    if wanted and wanted in names:
+        return wanted
+    for want in UPSCALE_WANTED:
+        for name in names:
+            key = name.casefold()
+            if want in key and "anime" not in key:
+                return name
+    return names[0] if names else ""
+
+
+class Upscaler:
+    """Makes small covers bigger and sharper with an upscale model on the AI server of the AI window (one picture at
+    a time), keeping each result in the cache folder; without a server or a model the cover stays as it is."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.url = ""
+        self.resolver = None             # gives the address when none was set (the window's AI server)
+        self.server = None
+        self.models: list = []
+        self.retry_at = 0.0
+        self.note = ""                   # why nothing was upscaled, for the log
+
+    def configure(self, url: str) -> None:
+        url = AIServer.normalize(url)
+        if url != self.url:
+            with self.lock:
+                self.url, self.server, self.models, self.retry_at = url, None, [], 0.0
+
+    def _connect(self):
+        if self.server is not None:
+            return self.server
+        if not self.url and self.resolver is not None:
+            try:
+                self.url = AIServer.normalize(self.resolver())
+            except Exception as exc:  # noqa: BLE001 - no address: no upscaling
+                log_line(f"upscale address: {exc}")
+        if time.time() < self.retry_at or not self.url:
+            return None
+        problem = ""
+        try:
+            server = AIServer.detect(self.url)
+            self.models = server.upscalers() if server is not None else []
+        except AIError as exc:
+            server, problem = None, str(exc)
+        if server is None:
+            self.retry_at = time.time() + 60                 # not on every game of a batch
+            self.note = problem or TEXTS["up_no_server"].format(url=self.url)
+            return None
+        self.server = server
+        return server
+
+    def apply(self, img, src_path, profile: dict):
+        """The cover upscaled when it is smaller than the settings say (from the cache when it was done before)."""
+        if img is None or not profile.get("upscale") or img.height >= int(profile.get("upscale_below", 800) or 0):
+            return img
+        try:
+            digest = file_sha(src_path)[7:23] if src_path else hashlib.sha256(img.tobytes()).hexdigest()[:16]
+        except OSError:
+            return img
+        wanted = profile.get("upscale_model", "")
+        for done in sorted(CACHE_DIR.glob(f"up-{digest}-*.jpg")) if CACHE_DIR.is_dir() else []:
+            if not wanted or done.stem.endswith(re.sub(r"[^A-Za-z0-9]+", "_", wanted)[:40]):
+                try:
+                    return load_picture(done)
+                except (OSError, ValueError):
+                    break
+        with self.lock:
+            server = self._connect()
+            if server is None:
+                return img
+            model = pick_upscaler(self.models, wanted)
+            if not model:
+                self.note = TEXTS["up_no_model"]
+                return img
+            try:
+                big = server.upscale(img.convert("RGB"), model, 4.0 if img.height * 4 <= 3200 else 2.0)
+            except AIError as exc:
+                self.note = str(exc)
+                self.server = None
+                return img
+        if big.height > 2400:
+            big.thumbnail((2400 * big.width // big.height, 2400), LANCZOS)
+        try:
+            CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            path = CACHE_DIR / f"up-{digest}-{re.sub(r'[^A-Za-z0-9]+', '_', model)[:40]}.jpg"
+            tmp = path.with_name(path.name + ".tmp")
+            big.convert("RGB").save(tmp, "JPEG", quality=94)
+            os.replace(tmp, path)
+        except OSError as exc:
+            log_line(f"upscale cache: {exc}")
+        self.note = ""
+        return big.convert("RGBA")
+
+
+UPSCALER = Upscaler()
+
+
 # ======================================================================================================== GUI
 BG, PANEL, PANEL2, BLUE, FG, MUTED = "#08131d", "#0d1c2a", "#142536", "#076aef", "#eaf4ff", "#95a8bf"
 ENTRY, TROUGH, LINE, SOFT, CANVAS_BG = "#0a1724", "#293e51", "#1d3247", "#a7c9eb", "#1b2633"
@@ -2675,6 +3434,8 @@ TEXTS = {
     "view_3d": "3D view", "view_front": "Front 2D", "view_spine": "Spine 2D", "fit_view": "⤢ Fit",
     "help": "Drag the coloured corners to fit the perspective · wheel: zoom · right button: pan · "
             "arrow keys: move a corner by 1 px (Shift: 10 px)",
+    "help_disc": "The Disc tab sets the disc · wheel: zoom · right button: pan · double click: fit",
+    "info_disc": "Disc",
     "no_game": "Pick a platform and a game in the list on the left.",
     "info_front": "front", "info_spine": "spine", "info_3d": "Box - 3D",
     "src_spine": "Box - Spine", "src_full": "cut from Box - Full", "src_generate": "made up",
@@ -2725,7 +3486,7 @@ TEXTS = {
     "pics_section": "6. Picking pictures",
     "match_region": "Box - Spine only from the front's region folder",
     "front_fallbacks": "No Box - Front: use Box - Front - Reconstructed / Fanart - Box - Front",
-    "override_section": "7. This game only", "override_load": "Own picture…",
+    "override_section": "8. This game only", "override_load": "Own picture…",
     "override_clear": "Remove own pictures",
     "text_section": "1. Add text to: {face}",
     "text_value": "Text — {title} {year} {platform} {developer} {publisher} {region} {genre} {series} {version}",
@@ -2735,35 +3496,75 @@ TEXTS = {
     "up": "▲", "down": "▼", "delete": "✕ Delete", "layer_props": "4. Selected layer",
     "apply_text": "Change text", "layer_text": "Text: {v}", "layer_logo": "Logo: {v}",
     "layer_clearlogo": "Game's Clear Logo (else Marquee)", "no_layers": "No layers — add a text or a logo.",
-    "out_section": "1. Where to save", "region_same": "In the region folder the front comes from",
-    "region_root": "In the main Box - 3D folder",
-    "existing_section": "2. When a game already has a Box - 3D", "ex_skip": "Skip the game",
+    "out_section": "2. Where to save", "region_same": "In the region folder the front comes from",
+    "region_root": "In the main folder (no region folder)",
+    "existing_section": "3. When a game already has the picture", "ex_skip": "Skip it",
     "ex_replace": "Replace the picture LaunchBox shows (old one to Backups)",
     "ex_next": "Add as another picture (-02, -03…; the current one stays first)",
-    "format_section": "3. File", "fmt_png": "PNG (transparent)", "fmt_jpg": "JPG", "jpg_bg": "JPG background…",
-    "max_height": "Max height (px, 0 = no limit)", "trim": "Trim transparent margins",
-    "threads": "Threads", "go_section": "4. Make boxes", "save_one": "💾 Save this game to LaunchBox",
+    "format_section": "4. File", "fmt_png": "PNG (transparent)", "fmt_jpg": "JPG", "jpg_bg": "JPG background…",
+    "max_height": "Max height of a Box - 3D (px, 0 = no limit)", "trim": "Trim transparent margins",
+    "threads": "Threads", "go_section": "5. Make", "save_one": "💾 Save this game to LaunchBox",
     "export_one": "Export this game to a file…", "make_selected": "Make for the selected games ({n})",
     "make_shown": "Make for the games in the list ({n})", "make_all": "Make for the whole platform ({n})",
-    "profile_section": "5. Settings (project)", "profile_default": "Use as default for new platforms",
+    "profile_section": "6. Settings (project)", "profile_default": "Use as default for new platforms",
     "profile_export": "Save settings to a file…", "profile_import": "Load settings from a file…",
     "profile_reset": "Restore factory settings", "log_section": "Log",
     "stop": "■ Stop", "ready": "Ready.",
-    "batch_progress": "{done}/{total} · saved {saved} (generic {generic}) · skipped {skipped} · no front {nofront} · "
-                      "errors {errors}",
-    "batch_done": "Done ({platform}): saved {saved} (with a generic cover {generic}), skipped (already have 3D) "
-                  "{skipped}, no Box - Front {nofront}, repeated titles {dup}, errors {errors}.",
+    "batch_progress": "{done}/{total} · 3D {saved} · discs {discs} · web covers {covers} · generic {generic} · "
+                      "skipped {skipped} · errors {errors}",
+    "batch_done": "Done ({platform}): Box - 3D {saved}, discs {discs}, covers from the web {covers}, generic covers "
+                  "{generic}, skipped (all there) {skipped}, no Box - Front {nofront}, repeated titles {dup}, errors "
+                  "{errors}.",
     "batch_stopped": "Stopped.",
-    "confirm_batch": "Make a Box - 3D for {n} games?\n\nPlatform: {platform}\nBox: {template}\n"
-                     "When a Box - 3D is there: {policy}\nFolder: {folder}\n\n"
-                     "Expected: {make} new boxes ({generic} of them with a generic cover) · {skip} skipped (they "
-                     "have a Box - 3D) · {nofront} left out (no Box - Front)",
+    "confirm_batch": "Make pictures for {n} games?\n\nPlatform: {platform}\nMaking: {what}\nBox: {template}\n"
+                     "When the picture is there: {policy}\nFolder: {folder}\n\n"
+                     "Expected: {make} games to make · {skip} skipped (all there) · {nofront} left out (no Box - Front)"
+                     "{extra}",
+    "confirm_missing_web": "\n{generic} of them have no Box - Front: their cover is looked for on the web ({where}) "
+                           "and saved as their Box - Front",
+    "confirm_missing_generic": ", else a generic cover is made.",
+    "confirm_missing_only_generic": "\n{generic} of them have no Box - Front: they get a generic cover.",
+    "confirm_missing_end": ".",
+    "web_failed": "the web could not be reached",
+    "up_no_server": "Upscaling: no AI server answers at {url} (start one, see the AI window)",
+    "up_no_model": "Upscaling: the AI server has no upscale model (Stability Matrix: Model Browser, an ESRGAN model "
+                   "such as 4x-UltraSharp)",
+    "web_title": "No Box - Front at all: look on the web first", "web_auto": "Automatic (libretro; Steam for PC)",
+    "web_libretro": "libretro-thumbnails", "web_steam": "Steam", "web_off": "Off", "web_system": "libretro system",
+    "web_system_auto": "Empty = automatic: {name}", "web_system_none": "Empty = automatic: none fits, choose one",
+    "web_system_not_games": "Empty = automatic: none (manuals, magazines, videos… are not looked for on their own)",
+    "web_find": "🔎 Find this game's cover on the web", "web_searching": "Looking for {title} on the web…",
+    "web_found": "Cover found ({where}) and saved as Box - Front: {path}", "web_none": "No cover found for {title}.",
+    "web_has_front": "This game already has a Box - Front.",
+    "web_note": "A cover found is saved as the game's Box - Front in LaunchBox (as LaunchBox's own download would). "
+                "Only the same title counts (a near one is often another game); games with none found get the "
+                "generic cover.",
+    "up_section": "7. Sharper small covers (AI)",
+    "up_on": "Make covers sharper with an AI upscale model when they are less than this high (px):",
+    "up_model": "Model", "up_refresh": "↻ Ask the AI server", "up_models": "{n} upscale models on {server}.",
+    "up_note": "Uses the AI server of the AI window (Forge, SD.Next, A1111 or ComfyUI with an ESRGAN-type model). "
+               "Each cover is done once; the results are kept in {cache}.",
+    "tab_disc": "Disc", "view_disc": "Disc",
+    "disc_kind_section": "1. Kind of disc", "disc_auto": "From the platform (now: {kind})", "disc_cd": "CD, silver centre",
+    "disc_dvd": "DVD", "disc_bluray": "Blu-ray, blue silver", "disc_psx": "PlayStation, black, printed to the hub",
+    "disc_gamecube": "GameCube, 8 cm", "disc_picture": "Picture disc, printed to the hole",
+    "disc_art_section": "2. The picture", "disc_crop": "Part of the cover", "disc_top": "Top", "disc_center": "Middle",
+    "disc_bottom": "Bottom", "disc_zoom": "Zoom", "disc_more_section": "3. On the disc",
+    "disc_logo": "Game's Clear Logo (else its Marquee)", "disc_logo_size": "Logo size",
+    "disc_text": "Text along the edge — {title} {year} {publisher} {developer} {region}…", "disc_text_pos": "Where",
+    "disc_text_top": "Top", "disc_text_bottom": "Bottom", "disc_text_color": "Text colour…",
+    "disc_size": "Disc size (px)",
+    "disc_note": "Discs are saved as LaunchBox's “Disc” pictures (Save tab: What to make). A game with no Box - Front "
+                 "gets a disc from its generic cover.",
+    "what_section": "1. What to make", "make_box": "Box - 3D", "make_disc": "Disc",
+    "disc_show": "👁 Show the disc in the preview",
+    "nothing_chosen": "Choose what to make (Box - 3D or Disc) at the top of the Save tab.",
     "nothing_to_make": "Nothing to make: of {n} games, {skip} already have a Box - 3D and {nofront} have no "
                        "Box - Front.",
     "aborted_in_a_row": "Stopped after {n} errors in a row — see the log (disk full? folder gone?).",
     "aborted_share": "Stopped: more than {pct}% of the boxes failed — see the log.",
     "saved_one": "Saved: {path}", "exported": "Exported: {path}",
-    "exists_ask": "This game already has a Box - 3D:\n{path}\n\nYes = replace it (the old file goes to Backups)\n"
+    "exists_ask": "This game already has:\n{path}\n\nYes = replace it (the old file goes to Backups)\n"
                   "No = add as another picture\nCancel = do nothing",
     "no_front": "This game has no Box - Front picture.", "busy": "Boxes are being made — wait or stop.",
     "refresh_note": "LaunchBox shows new pictures after a restart (or an image refresh).",
@@ -2841,7 +3642,8 @@ def load_config() -> dict:
     cfg = {"lb_root": "", "last_platform": "", "geometry": "", "templates": {}, "profiles": {},
            "default_profile": None, "custom_templates": [],
            "export": {"region": "same", "existing": "skip", "format": "png", "jpg_bg": "#ffffff", "max_height": 1000,
-                      "trim": True, "threads": max(1, min(6, (os.cpu_count() or 4) - 1))},
+                      "trim": True, "threads": max(1, min(6, (os.cpu_count() or 4) - 1)), "make_box": True,
+                      "make_disc": False},
            "display": {"guides": True, "hq": True}, "ai": {}}
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -2912,6 +3714,8 @@ class App:
         self.status_text = ""
         self.layer_index = -1
         self.ai_dialog = None
+        UPSCALER.configure((self.cfg.get("ai") or {}).get("url", "") if isinstance(self.cfg.get("ai"), dict) else "")
+        UPSCALER.resolver = self.ai_url
         self.shot_state = "start" if self.options.get("screenshot") and not self.options.get("ai") else None
         root.title(f"{APP_NAME} {APP_VERSION}")
         self.k = max(1.0, root.winfo_fpixels("1i") / 96.0)
@@ -3120,15 +3924,20 @@ class App:
         if hasattr(self, "gc_auto_label"):
             maker, name = platform_names(self.platform)
             self.gc_auto_label.configure(text=self.t("gc_auto", name=name or "—", maker=maker or "—"))
+        self.update_platform_labels()
 
     def setting_changed(self, scope, key, slider=False):
         if scope in ("profile",) and key in ("front_fallbacks", "match_region"):
             self.refresh_statuses()
             self.load_current()
+        if scope == "profile" and key in ("upscale", "upscale_below", "upscale_model") and not slider:
+            self.load_current()                      # the cover shown, upscaled or not
         if scope == "profile" and (key == "generic_cover" or key.startswith("gc_")):
             self.update_info()
         if scope == "export":
             self.update_output_label()
+            if key in ("make_box", "make_disc"):
+                self.update_info()
         if scope == "layer":
             self.refresh_layers(keep=True)
         self.schedule_save()
@@ -3297,7 +4106,7 @@ class App:
         bar = tk.Frame(parent, bg=BG)
         bar.pack(fill="x", pady=(0, 4))
         self.view_buttons = {}
-        for key, text in (("3d", "view_3d"), ("front", "view_front"), ("spine", "view_spine")):
+        for key, text in (("3d", "view_3d"), ("front", "view_front"), ("spine", "view_spine"), ("disc", "view_disc")):
             b = self.button(bar, self.t(text), lambda k=key: self.set_view(k), "blue" if self.view == key else "normal")
             b.pack(side="left", padx=(0, 4))
             self.view_buttons[key] = b
@@ -3329,13 +4138,14 @@ class App:
         self.notebook = ttk.Notebook(parent)
         self.notebook.pack(fill="both", expand=True, padx=4, pady=4)
         tabs = {}
-        for key in ("tab_template", "tab_art", "tab_text", "tab_export"):
+        for key in ("tab_template", "tab_art", "tab_text", "tab_disc", "tab_export"):
             outer, inner = self.scrollable(self.notebook)
             self.notebook.add(outer, text=self.t(key))
             tabs[key] = inner
         self.build_template_tab(tabs["tab_template"])
         self.build_art_tab(tabs["tab_art"])
         self.build_text_tab(tabs["tab_text"])
+        self.build_disc_tab(tabs["tab_disc"])
         self.build_export_tab(tabs["tab_export"])
         tab = self.options.get("tab")
         if tab is not None:
@@ -3583,6 +4393,49 @@ class App:
             var = tk.BooleanVar()
             self.check(body, self.t(key), var).pack(fill="x")
             self.bind_var(var, "profile", key, bool)
+        self.label(body, self.t("web_title"), SOFT, 9, True).pack(fill="x", pady=(8, 0))
+        grid = tk.Frame(body, bg=PANEL2)
+        grid.pack(fill="x")
+        var = tk.StringVar()
+        for i, (value, key) in enumerate((("auto", "web_auto"), ("libretro", "web_libretro"), ("steam", "web_steam"),
+                                          ("off", "web_off"))):
+            self.radio(grid, self.t(key), var, value).grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 14))
+        self.bind_var(var, "profile", "web_covers", str)
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(4, 0))
+        self.label(row, self.t("web_system")).pack(side="left")
+        var = tk.StringVar()
+        self.web_system_combo = ttk.Combobox(row, textvariable=var, height=20,
+                                             values=[""] + sorted(set(LIBRETRO_SYSTEMS.values())),
+                                             postcommand=self.load_libretro_systems)
+        self.web_system_combo.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.bind_var(var, "profile", "web_system", str)
+        self.web_auto_label = self.label(body, "", MUTED, 8, wraplength=self.px(370))
+        self.web_auto_label.pack(fill="x")
+        self.web_button = self.button(body, self.t("web_find"), self.find_web_cover)
+        self.web_button.pack(fill="x", pady=(4, 0))
+        self.label(body, self.t("web_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(4, 0))
+
+        body = self.section(parent, self.t("up_section"))
+        var = tk.BooleanVar()
+        self.check(body, self.t("up_on"), var).pack(fill="x")
+        self.bind_var(var, "profile", "upscale", bool)
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(2, 0))
+        var = tk.IntVar()
+        tk.Spinbox(row, from_=200, to=3000, increment=50, textvariable=var, width=7, bg=ENTRY, fg=FG,
+                   buttonbackground=PANEL2, relief="flat", insertbackground=FG).pack(side="left", padx=(20, 0))
+        self.bind_var(var, "profile", "upscale_below", int)
+        self.label(row, self.t("up_model")).pack(side="left", padx=(14, 0))
+        var = tk.StringVar()
+        self.up_model_combo = ttk.Combobox(row, textvariable=var, height=16, values=[""])
+        self.up_model_combo.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.bind_var(var, "profile", "upscale_model", str)
+        self.button(body, self.t("up_refresh"), self.refresh_upscalers).pack(anchor="w", pady=(6, 0))
+        self.up_label = self.label(body, "", MUTED, 8, wraplength=self.px(370))
+        self.up_label.pack(fill="x")
+        self.label(body, self.t("up_note", cache=CACHE_DIR), MUTED, 8, wraplength=self.px(370)).pack(fill="x",
+                                                                                                  pady=(4, 0))
 
         body = self.section(parent, self.t("override_section"))
         row = tk.Frame(body, bg=PANEL2)
@@ -3671,7 +4524,63 @@ class App:
         self.check(body, self.t("only_made"), var).pack(fill="x", pady=(6, 0))
         self.bind_var(var, "layer", "only_made", bool)
 
+    def build_disc_tab(self, parent):
+        body = self.section(parent, self.t("disc_kind_section"))
+        var = tk.StringVar()
+        self.disc_auto_radio = self.radio(body, "", var, "auto")
+        self.disc_auto_radio.pack(fill="x")
+        for kind in DISC_KINDS:
+            self.radio(body, self.t("disc_" + kind), var, kind).pack(fill="x")
+        self.bind_var(var, "profile", "disc_kind", str)
+
+        body = self.section(parent, self.t("disc_art_section"))
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x")
+        self.label(row, self.t("disc_crop")).pack(side="left")
+        var = tk.StringVar()
+        for value in ("top", "center", "bottom"):
+            self.radio(row, self.t("disc_" + value), var, value).pack(side="left", padx=(10, 0))
+        self.bind_var(var, "profile", "disc_crop", str)
+        self.slider(body, self.t("disc_zoom"), "profile", "disc_zoom", 1.0, 3.0, 0.05, lambda v: f"{v * 100:.0f}%", 1.0)
+
+        body = self.section(parent, self.t("disc_more_section"))
+        var = tk.BooleanVar()
+        self.check(body, self.t("disc_logo"), var).pack(fill="x")
+        self.bind_var(var, "profile", "disc_logo", bool)
+        self.slider(body, self.t("disc_logo_size"), "profile", "disc_logo_size", 0.2, 0.9, 0.01,
+                    lambda v: f"{v * 100:.0f}%", 0.55)
+        self.label(body, self.t("disc_text"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(8, 2))
+        var = tk.StringVar()
+        tk.Entry(body, textvariable=var, bg=ENTRY, fg=FG, insertbackground=FG, relief="flat",
+                 font=ui_font(10)).pack(fill="x", ipady=3)
+        self.bind_var(var, "profile", "disc_text", str)
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(4, 0))
+        self.label(row, self.t("disc_text_pos")).pack(side="left")
+        var = tk.StringVar()
+        for value in ("top", "bottom"):
+            self.radio(row, self.t("disc_text_" + value), var, value).pack(side="left", padx=(10, 0))
+        self.bind_var(var, "profile", "disc_text_pos", str)
+        self.color_button(row, self.t("disc_text_color"), "profile", "disc_text_color").pack(side="right")
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(8, 0))
+        self.label(row, self.t("disc_size")).pack(side="left")
+        var = tk.IntVar()
+        tk.Spinbox(row, from_=200, to=3000, increment=100, textvariable=var, width=7, bg=ENTRY, fg=FG,
+                   buttonbackground=PANEL2, relief="flat", insertbackground=FG).pack(side="right")
+        self.bind_var(var, "profile", "disc_size", int)
+        self.label(body, self.t("disc_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(8, 0))
+        self.button(body, self.t("disc_show"), lambda: self.set_view("disc")).pack(anchor="w", pady=(6, 0))
+
     def build_export_tab(self, parent):
+        body = self.section(parent, self.t("what_section"))
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x")
+        for key in ("make_box", "make_disc"):
+            var = tk.BooleanVar()
+            self.check(row, self.t(key), var).pack(side="left", padx=(0, 18))
+            self.bind_var(var, "export", key, bool)
+
         body = self.section(parent, self.t("out_section"))
         self.out_label = self.label(body, "", FG, 8, wraplength=self.px(370))
         self.out_label.pack(fill="x", pady=(0, 4))
@@ -4027,6 +4936,9 @@ class App:
         parts.append(spine_text)
         n3d = len(f.get("box3d") or [])
         parts.append(f"{self.t('info_3d')}: " + (self.t("has3d", n=n3d) if n3d else self.t("no3d")))
+        ndisc = len(f.get("disc") or [])
+        if ndisc or self.view == "disc" or self.cfg["export"].get("make_disc"):
+            parts.append(f"{self.t('info_disc')}: " + (self.t("has3d", n=ndisc) if ndisc else self.t("no3d")))
         self.info_label.configure(text="   ·   ".join(parts))
 
     # ------------------------------------------------------------------------------------------- templates
@@ -4135,6 +5047,89 @@ class App:
         self.schedule_save()
         self.update_info()
         self.request_draw()
+
+    def ai_url(self) -> str:
+        """The AI server's address: the AI window's, else that of Stability Matrix's active package."""
+        url = (self.cfg.get("ai") or {}).get("url", "") if isinstance(self.cfg.get("ai"), dict) else ""
+        if url:
+            return url
+        packages = sm_packages(sm_library(find_stability_matrix((self.cfg.get("ai") or {}).get("sm_exe", ""))))
+        active = next((p for p in packages if p["active"]), packages[0] if packages else None)
+        return active["url"] if active else "http://127.0.0.1:7860"
+
+    def find_web_cover(self):
+        """Look on the web for the cover of the game shown (one with no Box - Front) and save it into LaunchBox."""
+        if self.current is None or self.lb is None:
+            return
+        found = dict(self.current_found or self.found.get(self.current_index, {}))
+        if found.get("front"):
+            self.set_status(self.t("web_has_front"))
+            return
+        game, index, lb, name, profile = self.current, self.current_index, self.lb, self.platform, copy.deepcopy(
+            self.profile)
+        if profile.get("web_covers", "auto") == "off":
+            profile["web_covers"] = "auto"                 # the button asks for it even when batches don't
+        self.set_status(self.t("web_searching", title=game.title))
+        self.web_button.configure(state="disabled")
+
+        def work():
+            try:
+                path, where = fetch_missing_cover(lb, name, game, profile, found)
+                self.queue.put(("webcover", index, game, path, where, found, None))
+            except Exception as exc:  # noqa: BLE001
+                self.queue.put(("webcover", index, game, None, "", None, f"{type(exc).__name__}: {exc}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def load_libretro_systems(self):
+        """libretro's full list of systems for the combobox (from the web, kept two weeks)."""
+        if getattr(self, "_systems_asked", False):
+            return
+        self._systems_asked = True
+
+        def work():
+            try:
+                self.queue.put(("systems", libretro_systems()))
+            except (OSError, ValueError, http.client.HTTPException) as exc:
+                self.queue.put(("log", f"libretro: {exc}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def refresh_upscalers(self):
+        """Ask the AI server which upscale models it has."""
+        url = self.ai_url()
+        UPSCALER.configure(url)
+        self.up_label.configure(text=self.t("ai_checking", url=url))
+
+        def work():
+            try:
+                server = AIServer.detect(url)
+                if server is None:
+                    self.queue.put(("upmodels", [], "", TEXTS["up_no_server"].format(url=url)))
+                    return
+                self.queue.put(("upmodels", server.upscalers(), server.name, ""))
+            except AIError as exc:
+                self.queue.put(("upmodels", [], "", str(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def update_platform_labels(self):
+        """The hints that depend on the platform: libretro's system and the disc's kind when left automatic."""
+        if hasattr(self, "web_auto_label"):
+            official = self.lb.official.get(self.platform, "") if self.lb else ""
+            system = libretro_system(self.platform, official)
+            if system:
+                text = self.t("web_system_auto", name=system)
+            elif not_games(self.platform) or not_games(official):
+                text = self.t("web_system_not_games")
+            elif is_pc_platform(self.platform, official):
+                text = self.t("web_system_auto", name="Steam")
+            else:
+                text = self.t("web_system_none")
+            self.web_auto_label.configure(text=text)
+        if hasattr(self, "disc_auto_radio"):
+            kind = disc_kind({"disc_kind": "auto"}, self.platform)
+            self.disc_auto_radio.configure(text=self.t("disc_auto", kind=self.t("disc_" + kind)))
 
     def open_ai_dialog(self):
         if self.ai_dialog is not None and not self.ai_dialog.closed:
@@ -4488,7 +5483,10 @@ class App:
         self.view = view
         for key, b in self.view_buttons.items():
             b.configure(bg=BLUE if key == view else "#1b3550", fg="white" if key == view else FG)
+        if hasattr(self, "help_label"):
+            self.help_label.configure(text=self.t("help_disc" if view == "disc" else "help"))
         self.zoom, self.pan = 1.0, [0.0, 0.0]
+        self.update_info()
         self.request_draw()
 
     def fit_view(self):
@@ -4543,14 +5541,24 @@ class App:
             fit = (ch - m) / height * self.zoom
         scale = min(1.0, fit) * (0.55 if fast else 1.0)
         try:
-            img, used = render_box(self.profile, self.template_img, self.quads, pics, height=height,
-                                   scale=max(0.05, scale), ss=1 if fast or not hq else 2, fast=fast)
+            if self.view == "disc":
+                img = render_disc(self.profile, pics, self.platform, 400 if fast else
+                                  max(200, min(900, round(min(cw, ch) - m))))
+                used, scale = {}, 1.0
+            else:
+                img, used = render_box(self.profile, self.template_img, self.quads, pics, height=height,
+                                       scale=max(0.05, scale), ss=1 if fast or not hq else 2, fast=fast)
         except Exception as exc:  # noqa: BLE001 - a bad setting must not kill the preview
             c.create_text(cw // 2, ch // 2, text=f"{type(exc).__name__}: {exc}", fill="#ff8080", font=ui_font(10),
                           width=cw - 40)
             log_line(traceback.format_exc())
             return
-        if self.view in ("front", "spine"):
+        if img is None:                      # a disc for a game with no cover and no generic one
+            c.create_text(cw // 2, ch // 2, text=self.t("no_front_pic"), fill=MUTED, font=ui_font(12))
+            return
+        if self.view == "disc":
+            disp = min((cw - m) / img.width, (ch - m) / img.height) * self.zoom
+        elif self.view in ("front", "spine"):
             quad = used.get(self.view)
             if not quad:
                 c.create_text(cw // 2, ch // 2, text="—", fill=MUTED, font=ui_font(14))
@@ -4697,8 +5705,10 @@ class App:
         if not hasattr(self, "out_label"):
             return
         if self.lb and self.platform:
-            folder = self.lb.media_folder(self.platform, OUT_TYPE)
-            self.out_label.configure(text=str(folder))
+            export = self.cfg["export"]
+            kinds = [kind for kind, on in ((OUT_TYPE, export.get("make_box", True)),
+                                           (DISC_TYPE, export.get("make_disc", False))) if on] or [OUT_TYPE]
+            self.out_label.configure(text="\n".join(str(self.lb.media_folder(self.platform, k)) for k in kinds))
         else:
             self.out_label.configure(text="—")
 
@@ -4711,9 +5721,18 @@ class App:
         game, profile, template, quads, export = (self.current,) + self.batch_settings()
         overrides = dict(self.overrides)
         lb, name = self.lb, self.platform
-        if profile["faces"]["front"].get("source") == "launchbox" and not (
-                self.current_found.get("front") or "front" in overrides) and not profile.get("generic_cover", True):
+        needs_front = profile["faces"]["front"].get("source") == "launchbox"
+        if needs_front and not (self.current_found.get("front") or "front" in overrides) and not profile.get(
+                "generic_cover", True) and profile.get("web_covers", "auto") == "off":
             messagebox.showwarning(APP_NAME, self.t("no_front"), parent=self.root)
+            return
+        if to_file:          # the picture shown: the disc in the Disc view, else the box
+            kinds = [DISC_TYPE] if self.view == "disc" else [OUT_TYPE]
+        else:
+            kinds = [kind for kind, on in ((OUT_TYPE, export.get("make_box", True)),
+                                           (DISC_TYPE, export.get("make_disc", False))) if on]
+        if not kinds:
+            self.inform(self.t("nothing_chosen"))
             return
         dest = None
         if to_file:
@@ -4726,43 +5745,62 @@ class App:
             export["format"] = "jpg" if dest.lower().endswith((".jpg", ".jpeg")) else "png"
         else:
             found = lb.find(name, game, profile)
-            if found.get("box3d") and export.get("existing") == "skip":
-                answer = messagebox.askyesnocancel(APP_NAME, self.t("exists_ask", path=found["box3d"][0]),
+            there = [p for kind in kinds for p in (found.get("disc" if kind == DISC_TYPE else "box3d") or [])[:1]]
+            if there and export.get("existing") == "skip":
+                answer = messagebox.askyesnocancel(APP_NAME, self.t("exists_ask", path="\n".join(there)),
                                                    parent=self.root)
                 if answer is None:
                     return
                 export["existing"] = "replace" if answer else "next"
         index = self.current_index
         self.set_status("…")
+        height = self.generic_height()
 
         def work():
             try:
                 found = lb.find(name, game, profile)
+                if needs_front and not found.get("front") and "front" not in overrides:
+                    try:
+                        cover, where = fetch_missing_cover(lb, name, game, profile, found)
+                        if cover is not None:
+                            self.queue.put(("log", self.t("web_found", where=where, path=cover)))
+                    except (OSError, ValueError, http.client.HTTPException) as exc:
+                        self.queue.put(("log", f"{self.t('web_failed')}: {exc}"))
+                    if not found.get("front") and not profile.get("generic_cover", True):
+                        self.queue.put(("saved", index, [], bool(dest), self.t("no_front"), found))
+                        return
                 pics, _ = load_pictures(lb, name, game, profile, found)
                 if "front" in overrides:
                     pics.front = overrides["front"]
                 if "spine" in overrides:
                     pics.spine = overrides["spine"]
-                img, _ = render_box(profile, template, quads, pics, height=self.generic_height())
-                fmt = export.get("format", "png")
-                out = finish_picture(img, int(export.get("max_height") or 0), bool(export.get("trim", True)), fmt,
-                                     export.get("jpg_bg", "#ffffff"))
-                if dest:
-                    save_picture(out, Path(dest), None, None, lb.root, fmt)
-                    self.queue.put(("saved", index, dest, True, None))
-                    return
-                target = output_target(lb, name, game, found, export)
-                if target is None:
-                    self.queue.put(("saved", index, "", False, "skip"))
-                    return
-                path, region, replaced = target
+                fmt, saved = export.get("format", "png"), []
                 backup = lb.root / "Backups" / BACKUP_DIR_NAME / time.strftime("%Y-%m-%d %H-%M-%S")
-                save_picture(out, path, replaced, backup if replaced else None, lb.root, fmt)
-                lb.index(name, OUT_TYPE).add(region, str(path))
-                self.queue.put(("saved", index, str(path), False, None))
+                for kind in kinds:
+                    if kind == DISC_TYPE:
+                        img = render_disc(profile, pics, name)
+                        if img is None:
+                            continue
+                        out = finish_picture(img, 0, False, fmt, export.get("jpg_bg", "#ffffff"))
+                    else:
+                        img, _ = render_box(profile, template, quads, pics, height=height)
+                        out = finish_picture(img, int(export.get("max_height") or 0), bool(export.get("trim", True)),
+                                             fmt, export.get("jpg_bg", "#ffffff"))
+                    if dest:
+                        save_picture(out, Path(dest), None, None, lb.root, fmt)
+                        saved.append((kind, dest))
+                        continue
+                    target = output_target(lb, name, game, found, export, kind)
+                    if target is None:
+                        continue
+                    path, region, replaced = target
+                    save_picture(out, path, replaced, backup if replaced else None, lb.root, fmt)
+                    lb.index(name, kind).add(region, str(path))
+                    saved.append((kind, str(path)))
+                self.queue.put(("saved", index, saved, bool(dest), None if saved else "skip", found))
             except Exception as exc:  # noqa: BLE001
                 log_line(traceback.format_exc())
-                self.queue.put(("saved", index, "", bool(dest), f"{type(exc).__name__}: {exc}"))
+                self.queue.put(("saved", index, [], bool(dest), f"{type(exc).__name__}: {exc}", None))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -4779,24 +5817,39 @@ class App:
         else:
             idx = list(range(len(self.games)))
         if not idx:
-            messagebox.showinfo(APP_NAME, self.t("select_games"), parent=self.root)
+            self.inform(self.t("select_games"))
             return
         profile, template, quads, export = self.batch_settings()
         tname = self.t("generic_label") if template is None else self.t(
             "template_label", name=Path(profile.get("template", "")).name)
         policy = self.t("ex_" + {"skip": "skip", "replace": "replace", "next": "next"}.get(
             export.get("existing"), "skip") + "_short")
-        make, skip, nofront, covers = batch_plan([self.found.get(i, {}) for i in idx], export.get("existing", "skip"),
-                                                 profile["faces"]["front"].get("source") == "launchbox",
-                                                 bool(profile.get("generic_cover", True)))
-        if not make:
-            messagebox.showinfo(APP_NAME, self.t("nothing_to_make", n=len(idx), skip=skip, nofront=nofront),
-                                parent=self.root)
+        kinds = tuple(kind for kind, on in ((OUT_TYPE, export.get("make_box", True)),
+                                            (DISC_TYPE, export.get("make_disc", False))) if on)
+        if not kinds:
+            self.inform(self.t("nothing_chosen"))
             return
+        needs_front = profile["faces"]["front"].get("source") == "launchbox"
+        where = web_source(self.platform, self.lb.official.get(self.platform, ""), profile.get("web_covers", "auto"),
+                           profile.get("web_system", "")) if needs_front else ""
+        web = bool(where)
+        generic = bool(profile.get("generic_cover", True))
+        make, skip, nofront, covers = batch_plan([self.found.get(i, {}) for i in idx], export.get("existing", "skip"),
+                                                 needs_front, generic, kinds, web)
+        if not make:
+            self.inform(self.t("nothing_to_make", n=len(idx), skip=skip, nofront=nofront))
+            return
+        extra = ""
+        if covers and web:
+            extra = self.t("confirm_missing_web", generic=covers, where=where) + self.t(
+                "confirm_missing_generic" if generic else "confirm_missing_end")
+        elif covers:
+            extra = self.t("confirm_missing_only_generic", generic=covers)
+        what = " + ".join(self.t("make_box" if kind == OUT_TYPE else "make_disc") for kind in kinds)
+        folders = "\n".join(str(self.lb.media_folder(self.platform, kind)) for kind in kinds)
         if not self.options.get("yes") and not messagebox.askyesno(APP_NAME, self.t(
-                "confirm_batch", n=len(idx), platform=self.platform, template=tname, policy=policy,
-                folder=self.lb.media_folder(self.platform, OUT_TYPE), make=make, skip=skip, nofront=nofront,
-                generic=covers), parent=self.root):
+                "confirm_batch", n=len(idx), platform=self.platform, what=what, template=tname, policy=policy,
+                folder=folders, make=make, skip=skip, nofront=nofront, extra=extra), parent=self.root):
             return
         games = [self.games[i] for i in idx]
         self.batch_stop = threading.Event()
@@ -4891,6 +5944,12 @@ class App:
         self.status_text = text
         if hasattr(self, "status_label"):
             self.status_label.configure(text=text)
+
+    def inform(self, text):
+        """A message box, or only the status line when started not to ask (the tests)."""
+        self.set_status(text)
+        if not self.options.get("yes"):
+            messagebox.showinfo(APP_NAME, text, parent=self.root)
 
     def log(self, text):
         line = time.strftime("%H:%M:%S ") + text
@@ -5021,7 +6080,13 @@ class App:
                     self.set_view(self.options.pop("view"))
             self.request_draw()
         elif kind == "saved":
-            _, index, path, to_file, error = msg
+            _, index, saved, to_file, error, found = msg
+            if found and not to_file and 0 <= index < len(self.games) and found.get("front") and not \
+                    self.found.get(index, {}).get("front"):        # a cover came from the web on the way
+                self.found[index] = found
+                if index == self.current_index:
+                    self.current_found = found
+                    self.load_current()
             if error == "skip":
                 self.set_status(self.t("ex_skip_short"))
             elif error:
@@ -5029,19 +6094,48 @@ class App:
                 self.log(f"{self.t('error')}: {error}")
                 messagebox.showerror(APP_NAME, error, parent=self.root)
             else:
-                text = self.t("exported" if to_file else "saved_one", path=path)
+                text = "   ".join(self.t("exported" if to_file else "saved_one", path=path) for _kind, path in saved)
                 self.set_status(text)
                 self.log(text)
                 if not to_file and 0 <= index < len(self.games):
                     f = self.found.setdefault(index, {})
-                    f.setdefault("box3d", [])
-                    if path not in f["box3d"]:
-                        f["box3d"].append(path)
+                    for media, path in saved:
+                        f.setdefault("disc" if media == DISC_TYPE else "box3d", [])
+                        if path not in f["disc" if media == DISC_TYPE else "box3d"]:
+                            f["disc" if media == DISC_TYPE else "box3d"].append(path)
                     if index == self.current_index:
                         self.current_found = f
                     self.update_row(index)
                     self.update_platform_info()
                     self.update_info()
+        elif kind == "webcover":
+            _, index, game, path, where, found, error = msg
+            if hasattr(self, "web_button"):
+                self.web_button.configure(state="normal")
+            if error:
+                text = f"{self.t('error')}: {error}"
+            elif path is None:
+                text = self.t("web_none", title=game.title)
+            else:
+                text = self.t("web_found", where=where, path=path)
+                if 0 <= index < len(self.games) and found:
+                    self.found[index] = found
+                    self.update_row(index)
+                    self.update_platform_info()
+                if game is self.current:
+                    self.current_found = found or self.current_found
+                    self.load_current()
+            self.set_status(text)
+            self.log(text)
+        elif kind == "systems":
+            if hasattr(self, "web_system_combo"):
+                self.web_system_combo["values"] = [""] + list(msg[1])
+        elif kind == "upmodels":
+            _, models, server, problem = msg
+            if hasattr(self, "up_model_combo"):
+                self.up_model_combo["values"] = [""] + list(models)
+                self.up_label.configure(text=problem or (self.t("up_models", n=len(models), server=server) + (
+                    "" if models else " " + TEXTS["up_no_model"])))
         elif kind == "progress":
             _, done, total, counts = msg
             self.progress.configure(maximum=total, value=done)
@@ -5870,6 +6964,7 @@ class AIDialog:
                  size=num(self.size_var, int, 1024), gloss=num(self.gloss_var, float, 1.0),
                  preview=self.preview_var.get(), sm_exe=str(self.sm_exe or ""))
         self.app.cfg["ai"] = s
+        UPSCALER.configure(s["url"])                     # covers are upscaled on the same server
         self.app.schedule_save()
 
     def close(self):
@@ -6042,6 +7137,18 @@ def selftest(report: str) -> int:
         img, _ = render_box(default_profile(), tpl, quads, Pictures(front=front.convert("RGBA")))
         check("AI template (no server)", valid_quad(quads["front"]) and valid_quad(quads["spine"]) and tpl.height == 700
               and see_through(tpl, quads["front"]) and img.size == tpl.size, f"drawing {guide.size} -> {tpl.size}")
+        prof = dict(default_profile(), disc_text="{title} · © {year}")
+        disc = render_disc(prof, Pictures(front=front.convert("RGBA"), ctx={"title": "Combat", "year": ""}),
+                           "Sony Playstation 2", 400)
+        check("disc", disc.size == (400, 400) and disc.getpixel((200, 200))[3] == 0 and disc.getpixel((0, 0))[3] == 0
+              and disc.getpixel((340, 200))[3] == 255, f"kind {disc_kind(prof, 'Sony Playstation 2')}")
+        check("generic disc", render_disc(default_profile(), bare, "", 300).size == (300, 300))
+        names = ["Combat (USA)", "Combat (Europe)", "Combat (USA) (Beta)", "Pac-Man (USA)"]
+        check("web title matching", libretro_match("Combat", "Europe", names) == "Combat (Europe)"
+              and libretro_match("PacMan", "", names) == "Pac-Man (USA)" and libretro_match("Combat 2", "", names) == ""
+              and libretro_system("Atari 2600 [Games]") == "Atari - 2600" and not libretro_system("Atari 2600 Manuals"))
+        check("upscale off without a server", Upscaler().apply(front, None, dict(default_profile(), upscale=True,
+                                                                                  upscale_below=99999)) is front)
     except Exception:  # noqa: BLE001
         ok = False
         lines.append(traceback.format_exc())

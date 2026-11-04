@@ -2,8 +2,10 @@
 
 3D boxes for a LaunchBox library: it makes the **Box - 3D** picture of LaunchBox games from their **Box - Front** /
 **Box - Spine** pictures and saves it where LaunchBox looks for it, one game at a time or a whole platform at once.
-Games with no cover at all get a generic one, and new case templates can be painted by a local Stable Diffusion. One
-Python file (tkinter + Pillow), built into one exe with PyInstaller.
+It makes **discs** (LaunchBox's *Disc* pictures) from the same covers, looks for missing covers on the web
+(libretro-thumbnails, Steam), can make small covers sharper with an AI upscale model, gives games with no cover at all
+a generic one, and has new case templates painted by a local Stable Diffusion. One Python file (tkinter + Pillow),
+built into one exe with PyInstaller.
 
 **Download:** the Windows exe is on the [Releases](https://github.com/gregmol123/lb-3d-box-creator/releases) page
 (`LB3DBoxCreator-<version>.exe`, no install; it puts its templates in a `box model` folder beside itself). Windows may
@@ -16,7 +18,7 @@ the new pictures into its `Images` folders.
 | `lb_box3d_creator.py` | the whole program |
 | `box model\` | case templates, each with its corner file `.json` (a box3d profile): `AI *.png`, painted with this program's AI window, and the 3 of [box3d](https://github.com/RtaSistemas/box3d) (`box3d-mvs/arcade/dvd.png`, MIT, see `box3d-LICENSE.txt`); also built into the exe |
 | `build.bat` | builds `dist\LB3DBoxCreator-<version>.exe` (`--onefile --windowed --noupx`), copies `box model`, runs the exe's self-test |
-| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; AI templates with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
+| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
 
 ## Using it
 
@@ -66,19 +68,47 @@ the new pictures into its `Images` folders.
    the small line can be typed. The game's name is its title (without TOSEC tags such as "(1988)(Publisher)") or its
    Clear Logo. The cover takes the shape of the template's front. Games with a Box - Front (or a Reconstructed /
    Fanart one) keep their own cover; the info line under the preview says "front: generic cover" for the others.
+   **No Box - Front at all: look on the web first** (Automatic by default; libretro-thumbnails / Steam / Off): before a
+   generic cover is made, the game's real cover is looked for in
+   [libretro's thumbnail collection](https://thumbnails.libretro.com) (box art named after No-Intro / Redump / TOSEC
+   titles, for consoles and home computers) and, for PC platforms (Windows, MS-DOS…), Steam's portrait library cover. A
+   cover found is saved as the game's **Box - Front** in LaunchBox, as LaunchBox's own download would (main folder,
+   `<title>-01.png`, never over a file), and is used from then on. Only the same title counts — spaces, punctuation,
+   accents, "&"/"and" and "Legend of Zelda, The" may differ, nothing else, since a near title is often another game —
+   with the game's region first (else the region in the platform's name, "Sony Playstation EU"), a release before a
+   beta or demo, and on Steam the game itself or an edition of it ("— Remastered", "Enhanced"), never its soundtrack or
+   a sequel. libretro's system is found from the platform's LaunchBox name (*Scrape As*) or from a name that starts
+   with the system's model ("ZX Spectrum - Games", "Atari 2600/VCS"); the field under it shows the guess and takes any
+   of libretro's systems by hand. Platforms of manuals, magazines, books, videos, catalogs… are never looked up on
+   their own (their entries are named after games, but a game's box is not their cover). **🔎 Find this game's cover
+   on the web** does it for the game shown. Folder lists are kept two weeks; a server that does not answer is left
+   alone for two minutes, so a run without internet just makes generic covers.
+   **Sharper small covers (AI)** (off by default): covers less high than a size you choose (800 px) are made bigger and
+   sharper by an upscale model (ESRGAN, 4x-UltraSharp, SwinIR…) on the AI server of the AI window (Forge / SD.Next /
+   A1111: their upscalers; ComfyUI: a model in `models\upscale_models`); **↻ Ask the AI server** lists its models,
+   empty = a photo model is picked (never an anime one). Each cover is done once and kept in the cache folder; without
+   a server or a model the cover stays as it is.
 5. **Text / Logo** tab: texts with `{title} {year} {platform} {developer} {publisher} {region} {genre} {series}
    {version}` filled in for each game, logos from files, the game's own **Clear Logo** or **Arcade - Marquee**
    (each falls back to the other), per side, with position, size, rotation, opacity, colours. **Spine logo slots
    (box3d)** adds the template profile's top / game / bottom slots (top and bottom from its `assets\logo_top.*`,
    `logo_bottom.*`; without a profile one game slot); the game slot shows the Marquee, else the Clear Logo. Layers
    marked *Only on made-up spines* stay off games that have a real spine picture.
-6. **Save** tab: **Save this game to LaunchBox**, **Export this game to a file…**, or make the boxes for the selected
-   games / the games in the list / the whole platform (in several threads; **Stop** at any time). Before a run the
-   program says how many boxes it will make (and how many of them get a generic cover), skip and leave out (no
-   Box - Front, when generic covers are off); like box3d it stops by itself after 10 failures in a row or when more
+6. **Disc** tab: the game's disc, from its Box - Front: the kind (*from the platform* by default: PlayStation's black
+   disc printed to the hub, DVD for PS2 / Xbox / Wii, Blu-ray for PS3 / PS4 / Xbox One / Wii U, the small GameCube
+   disc, else a CD; or a picture disc printed to the hole), which square of the cover goes on the label (top, middle,
+   bottom) and zoom, the game's Clear Logo (else its Marquee) and its size, a line of text along the edge
+   (`{title} · © {year} {publisher}`…; fields a game lacks are left out with their separators) at the top or bottom in
+   a colour, the disc's size (1000 px). A game with no Box - Front gets a disc from its generic cover. **Disc** in the
+   preview's view buttons shows it.
+7. **Save** tab: **What to make** (Box - 3D, Disc or both), **Save this game to LaunchBox**, **Export this game to a
+   file…** (the picture shown: the disc in the Disc view), or make them for the selected games / the games in the list
+   / the whole platform (in several threads; **Stop** at any time). Before a run the program says how many games it
+   will make pictures for, how many of them have no Box - Front (and where their covers will be looked for on the web,
+   else a generic cover), skip and leave out; like box3d it stops by itself after 10 failures in a row or when more
    than 20 % fail (disk full, LaunchBox drive gone…).
 
-Views: 3D, Front 2D, Spine 2D (each side flattened); wheel = zoom, right button = pan, double click = fit.
+Views: 3D, Front 2D, Spine 2D (each side flattened), Disc; wheel = zoom, right button = pan, double click = fit.
 **Undo / Redo** (Ctrl+Z / Ctrl+Y) cover corners and settings. The interface is in English.
 
 ## AI templates (Stability Matrix)
@@ -129,6 +159,9 @@ height limited (1000 px by default). Files are written to `.tmp` and renamed, so
 pictures. The program never changes LaunchBox's XML files; LaunchBox shows the new pictures after a restart (or an
 image refresh).
 
+Discs go the same way into `<LaunchBox>\Images\<platform>\Disc\` (round PNG with a see-through hole, not cut or
+height-limited). Covers found on the web go into `Box - Front\` as above.
+
 Pictures are taken as LaunchBox would: the main folder first, then the game's region folder, then others; a
 Box - Spine only from the front's region folder (can be switched off), Box - Full checked against the front.
 
@@ -137,7 +170,8 @@ Box - Spine only from the front's region folder (can be switched off), Box - Ful
 `%USERPROFILE%\.lb_box3d_creator_config.json`: LaunchBox folder, settings per platform (case, sides, texts and
 logos; *Use as default for new platforms*; *Save settings to a file…* / *Load settings from a file…* keep one
 platform's settings in a `.lb3d.json` file), corners per template, save options, the AI window's settings (`ai`). Log:
-`%USERPROFILE%\.lb_box3d_creator.log`.
+`%USERPROFILE%\.lb_box3d_creator.log`. Cache: `%USERPROFILE%\.lb_box3d_creator_cache\` (libretro's folder lists, two
+weeks; upscaled covers); it can be deleted at any time.
 
 ## Credits
 
@@ -146,6 +180,9 @@ platform's settings in a `.lb3d.json` file), corners per template, save options,
   the spine logo slots and the stop-on-failures rule follow it.
 * The `AI *.png` templates were painted with this program's AI window on a local Stable Diffusion (Stability Matrix,
   ComfyUI, model juggernautXL); each one's `.json` records its prompt, model and seed.
+* Covers from the web come from [libretro-thumbnails](https://github.com/libretro-thumbnails/libretro-thumbnails)
+  (thumbnails.libretro.com) and Steam's store; none ship with the program. They belong to their publishers and are
+  downloaded one by one into your own LaunchBox library, as LaunchBox's own image download does.
 
 ## Developer switches
 

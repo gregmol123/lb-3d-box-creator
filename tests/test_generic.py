@@ -256,7 +256,7 @@ class Window(unittest.TestCase):
         self.assertTrue((out / "Mighty Term v1.0-01.png").is_file())
         app.make_boxes("all")                                            # the whole platform
         self.assertTrue(self.wait(lambda: not app.batch_running), "batch did not finish")
-        self.assertIn("generic cover 0", app.status_text)                # the generic one was already there
+        self.assertIn("generic covers 0", app.status_text)                # the generic one was already there
         self.assertTrue((out / "Europe" / "With Cover-01.png").is_file())
 
 
