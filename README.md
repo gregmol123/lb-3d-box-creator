@@ -21,7 +21,7 @@ the new pictures into its `Images` folders.
 | `lb_box3d_creator.py` | the whole program |
 | `box model\` | case templates, each with its corner file `.json` (a box3d profile): `AI *.png`, painted with this program's AI window, and the 3 of [box3d](https://github.com/RtaSistemas/box3d) (`box3d-mvs/arcade/dvd.png`, MIT, see `box3d-LICENSE.txt`); also built into the exe |
 | `build.bat` | builds `dist\LB3DBoxCreator-<version>.exe` (`--onefile --windowed --noupx`), copies `box model`, runs the exe's self-test |
-| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; back covers; logos cut from covers; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
+| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; back covers; logos cut from covers; Photoshop templates; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
 
 ## Using it
 
@@ -44,7 +44,9 @@ the new pictures into its `Images` folders.
    * *Box drawn in perspective* (no template): a cardboard box or a plastic keep case (rim colour; presets for
      Xbox 360, PS4, PS2, Wii, Switch…), turn, perspective, thickness (taken from the spine picture's shape when there
      is one). Fits any platform.
-   * A template from `box model` (or **Load template…**, any PNG of an empty case): the cover and the spine are
+   * A template from `box model` (or **Load template…**, any PNG — or Photoshop `.psd`, read through its merged
+     picture; one saved without it, Photoshop's *Maximize compatibility* off, is refused with a message instead of
+     showing blank — of an empty case): the cover and the spine are
      mapped onto the template's front and spine by their four corners. The shipped templates bring their corners;
      for others the corners are **found automatically** (the flat cover area of the template, the spine as the widest
      flat area left of it; a see-through cover window works too) and can be dragged with the mouse (arrow keys: 1 px,

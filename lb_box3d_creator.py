@@ -21,6 +21,7 @@ import random
 import re
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import threading
@@ -41,7 +42,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk, PngImagePlugin
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -53,6 +54,8 @@ MAX_ROWS = 5000
 COLUMNS = ("title", "region", "front", "spine", "box3d", "media")    # the game list's columns (media: Disc or Cart)
 FACES = ("front", "spine")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff"}
+TEMPLATE_EXTS = IMAGE_EXTS | {".psd"}                # case templates may be Photoshop files too (their merged picture)
+PICTURE_TYPES = "*.png *.webp *.jpg *.jpeg *.bmp *.psd"   # the file dialogs' pictures
 FRONT_TYPES = ("Box - Front", "Box - Front - Reconstructed", "Fanart - Box - Front")
 SPINE_TYPE, FULL_TYPE, LOGO_TYPE, OUT_TYPE = "Box - Spine", "Box - Full", "Clear Logo", "Box - 3D"
 DISC_TYPE = "Disc"
@@ -182,6 +185,18 @@ def load_picture(path, limit: int = 0):
         img = im.convert("RGBA")
     if limit and max(img.size) > limit * 1.5:
         img.thumbnail((limit, limit), LANCZOS)
+    return img
+
+
+def open_template(path):
+    """A case template as RGBA. A Photoshop file (.psd) gives its merged picture; one saved without it (Photoshop's
+    "Maximize compatibility" off: the merged picture is blank) is refused with a message instead of showing blank."""
+    with Image.open(path) as im:
+        im.load()
+        img = im.convert("RGBA")
+        psd = im.format == "PSD"
+    if psd and all(lo == hi for lo, hi in img.getextrema()):
+        raise ValueError(TEXTS["psd_no_merged"])
     return img
 
 
@@ -4275,8 +4290,8 @@ TEXTS = {
     "tab_template": "Box", "tab_art": "Artwork", "tab_text": "Text / Logo", "tab_export": "Save",
     "tpl_section": "1. Case (for this platform)", "tpl_generic": "Box drawn in perspective (no template)",
     "tpl_load": "Load template…", "tpl_folder": "Templates folder",
-    "tpl_note": "Templates are PNG pictures of empty cases (their cover area flat or see-through) from the “box "
-                "model” folder.",
+    "tpl_note": "Templates are PNG (or Photoshop .psd) pictures of empty cases (their cover area flat or see-through) "
+                "from the “box model” folder.",
     "face_section": "2. Active side", "face_front": "Front", "face_spine": "Spine",
     "corners_detect": "⌖ Detect corners automatically", "corners_reset": "↺ Reset corners (from the template's profile)",
     "corners_note": "Corners are remembered for each template.",
@@ -4426,6 +4441,7 @@ TEXTS = {
                  "use it.",
     "logo_frame_first": "Drag a frame round the logo on the cover first (▭ Pick the logo on the cover).",
     "logo_saved": "Clear Logo saved: {path}",
+    "psd_no_merged": "this Photoshop file has no merged picture — save it with “Maximize compatibility”, or as a PNG",
     "info_back": "Box - Back", "back_own": "yes (a scan or other picture)", "back_made": "made by this program",
     "filter_noback": "Without Box - Back", "filter_hasback": "With Box - Back", "gal_back": "Box - Back",
     "disc_show": "👁 Show the disc in the preview",
@@ -6018,7 +6034,7 @@ class App:
     def template_names(self):
         names = []
         try:
-            names = sorted((p.name for p in MODEL_DIR.iterdir() if p.suffix.lower() in IMAGE_EXTS),
+            names = sorted((p.name for p in MODEL_DIR.iterdir() if p.suffix.lower() in TEMPLATE_EXTS),
                            key=str.casefold)
         except OSError:
             pass
@@ -6081,8 +6097,7 @@ class App:
     def browse_template(self):
         path = filedialog.askopenfilename(parent=self.root, title=self.t("pick_template"),
                                           initialdir=str(MODEL_DIR) if MODEL_DIR.is_dir() else None,
-                                          filetypes=[(self.t("images"), "*.png *.webp *.jpg *.jpeg *.bmp"),
-                                                     (self.t("all_files"), "*.*")])
+                                          filetypes=[(self.t("images"), PICTURE_TYPES), (self.t("all_files"), "*.*")])
         if not path:
             return
         p = Path(path)
@@ -6109,7 +6124,7 @@ class App:
     def choose_gc_file(self, key, mode_key):
         """A picture for the generic cover (its ground or the platform's logo); that choice is switched on with it."""
         path = filedialog.askopenfilename(parent=self.root, title=self.t("pick_picture"),
-                                          filetypes=[(self.t("images"), "*.png *.webp *.jpg *.jpeg *.bmp"),
+                                          filetypes=[(self.t("images"), PICTURE_TYPES),
                                                      (self.t("all_files"), "*.*")])
         if not path:
             return
@@ -6265,7 +6280,7 @@ class App:
         folder = self.lb.media_folder(self.platform, CART_FRONT_TYPE) if self.lb and self.platform else None
         path = filedialog.askopenfilename(parent=self.root, title=self.t("pick_picture"),
                                           initialdir=str(folder) if folder and folder.is_dir() else None,
-                                          filetypes=[(self.t("images"), "*.png *.webp *.jpg *.jpeg *.bmp"),
+                                          filetypes=[(self.t("images"), PICTURE_TYPES),
                                                      (self.t("all_files"), "*.*")])
         if path:
             self.set_cart_donor(path)
@@ -6306,12 +6321,11 @@ class App:
             return
         path = self.template_path(name)
         try:
-            img = Image.open(path)
-            img.load()
-            self.template_img = img.convert("RGBA")
+            self.template_img = open_template(path)
             self.template_key = file_sha(path)
         except (OSError, ValueError) as exc:
             self.log(self.t("tpl_missing", name=name) + f" ({exc})")
+            self.set_status(self.t("tpl_missing", name=name) + f" ({exc})")
             self.template_img = None
             self.update_template_controls()
             return
@@ -8889,6 +8903,15 @@ def selftest(report: str) -> int:
             ImageDraw.Draw(titled).rectangle((30 + i * 60, 60, 60 + i * 60, 140), fill=(230, 30, 30))
         cut = cut_logo(titled, (10, 10, 290, 190))
         check("logo from a cover", cut is not None and cut.getchannel("A").getextrema()[0] == 0, str(cut and cut.size))
+        with tempfile.TemporaryDirectory() as tmp3:                  # a Photoshop template: its merged picture
+            case = Image.new("RGBA", (60, 40), (200, 30, 30, 255))
+            case.paste((0, 0, 0, 0), (10, 10, 50, 30))
+            header = b"8BPS" + struct.pack(">H6xHIIHH", 1, 4, 40, 60, 8, 3) + struct.pack(">I", 0) * 3
+            psd = Path(tmp3) / "case.psd"
+            psd.write_bytes(header + struct.pack(">H", 0) + b"".join(band.tobytes() for band in case.split()))
+            opened = open_template(psd)
+            check("photoshop template", opened.size == (60, 40) and opened.getpixel((30, 20))[3] == 0
+                  and opened.getpixel((2, 2)) == (200, 30, 30, 255), opened.mode)
         check("UMD", umd.size == (400, round(400 * UMD_HEIGHT)) and umd.getpixel((200, 200))[3] == 255
               and umd.getpixel((0, 0))[3] == 0 and umd.getpixel((4, umd.height - 4))[3] == 0,
               f"kind {disc_kind(default_profile(), 'Sony PSP')}")
