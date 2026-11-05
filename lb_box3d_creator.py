@@ -38,10 +38,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk, PngImagePlugin
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -57,7 +57,11 @@ FRONT_TYPES = ("Box - Front", "Box - Front - Reconstructed", "Fanart - Box - Fro
 SPINE_TYPE, FULL_TYPE, LOGO_TYPE, OUT_TYPE = "Box - Spine", "Box - Full", "Clear Logo", "Box - 3D"
 DISC_TYPE = "Disc"
 CART_FRONT_TYPE, CART_TYPE = "Cart - Front", "Cart - 3D"
-MEDIA_KEYS = {OUT_TYPE: "box3d", DISC_TYPE: "disc", CART_TYPE: "cart3d"}     # a made picture's kind -> its key in found
+BACK_TYPE = "Box - Back"
+SHOT_TYPES = ("Screenshot - Gameplay", "Screenshot - Game Title", "Screenshot - Game Select")
+MEDIA_KEYS = {OUT_TYPE: "box3d", DISC_TYPE: "disc", CART_TYPE: "cart3d", BACK_TYPE: "back"}   # kind -> key in found
+FRONT_KINDS = (OUT_TYPE, DISC_TYPE)      # the kinds made from the Box - Front (a missing one is looked for first)
+NOTES_KEPT = 1600                        # characters of a game's description kept for its back cover
 MARQUEE_TYPE = "Arcade - Marquee"
 LAYER_KINDS = ("text", "logo", "clearlogo", "marquee")
 RECORD_TAGS = {"Game", "AdditionalApplication", "CustomField", "AlternateName", "GameControllerSupport"}
@@ -762,6 +766,12 @@ def default_profile() -> dict:
         "cart_label_r": 0.8,
         "cart_label_b": 0.62,
         "cart_label_fit": "fill",  # fill (cut to the label's shape) | stretch
+        "back_logo": True,         # a made Box - Back: the game's Clear Logo at the top (else its title)
+        "back_shots": 3,           # ...this many screenshots
+        "back_notes": True,        # ...LaunchBox's description
+        "back_details": True,      # ...publisher, developer, year, genre, players, rating
+        "back_platform": True,     # ...the platform's logo
+        "back_height": 1400,
     }
 
 
@@ -1224,6 +1234,7 @@ class Pictures:
         self.generic = False            # the front is a generic cover made by this program
         self.trimmed: dict = {}         # pictures whose scanner margins were cut: key -> (left, top, right, bottom)
         self.cart_front = None          # the game's Cart - Front (a photo of the whole cartridge)
+        self.shots: list = []           # its screenshots, for a made back cover
 
     def spine_for(self, profile):
         """Spine art and where it came from: its own picture, cut from Box - Full, made up, or none."""
@@ -2064,6 +2075,168 @@ def render_cart(profile: dict, pics, platform: str = "", height: int = 1000, fas
     return make_cart(art, profile, platform, height, fast)
 
 
+# -------------------------------------------------------------------------------------------------- back covers
+# A "Box - Back" for a game without one, in the generic covers' look: the game's Clear Logo (else its title) at the
+# top, its screenshots, its description from LaunchBox and a line of details with the platform's logo at the bottom.
+# Only games without a Box - Back get one: a scan is never replaced (nor are the program's own backs, but on Replace).
+BACK_HEIGHT = 1400
+
+
+def _wrap(text: str, font, width: float, single: bool = False) -> list:
+    """The lines of `text` no wider than `width`: paragraphs (split at empty lines) keep an empty line between them;
+    `single`: every line of the text starts a new line, with nothing between."""
+    text = (text or "").replace("\r", "")
+    lines = []
+    for para in text.split("\n") if single else re.split(r"\n\s*\n", text):
+        line = ""
+        for word in para.split():
+            trial = f"{line} {word}".strip()
+            if not line or font.getlength(trial) <= width:
+                line = trial
+            else:
+                lines.append(line)
+                line = word
+        if line:
+            lines.append(line)
+        if not single:
+            lines.append("")
+    while lines and not lines[-1]:
+        lines.pop()
+    return lines
+
+
+def text_block(text: str, size, color, font_name: str = "Arial", largest: float = 42, smallest: float = 20,
+               single: bool = False):
+    """`text` laid out in a w x h box (RGBA): as large as fits, and cut short with "…" at the smallest size."""
+    w, h = max(1, int(size[0])), max(1, int(size[1]))
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    if not (text or "").strip():
+        return img
+    px = float(largest)
+    while True:
+        font = load_font(font_name, px)
+        step = px * 1.3
+        lines = _wrap(text, font, w, single)
+        if len(lines) * step <= h or px <= smallest:
+            break
+        px = max(smallest, px * 0.92)
+    room = max(1, int(h // step))
+    if len(lines) > room:
+        lines = lines[:room]
+        last = lines[-1]
+        while last and font.getlength(last + " …") > w:
+            last = last.rsplit(" ", 1)[0] if " " in last else last[:-1]
+        lines[-1] = last.rstrip(" ,.;:-") + " …"
+    d = ImageDraw.Draw(img)
+    for i, line in enumerate(lines):
+        d.text((0, round(i * step)), line, font=font, fill=tuple(color) + (255,))
+    return img
+
+
+def back_size(profile: dict, pics, height=None):
+    """A back cover's size: as high as asked, shaped like the game's Box - Front (like a generic cover without one)."""
+    h = max(280, int(height or profile.get("back_height", BACK_HEIGHT)))
+    front = pics.front
+    ratio = front.width / front.height if front is not None and front.height else 995 / GC_HEIGHT
+    return max(200, round(h * min(1.6, max(0.45, ratio)))), h
+
+
+def make_back(profile: dict, pics, size=None):
+    """A back cover (RGBA, opaque) for a game without one."""
+    w, h = size or back_size(profile, pics)
+    ctx = pics.ctx
+    ink = gc_ink(profile)
+    img = gc_background((w, h), profile.get("gc_style", "silver"), profile.get("gc_bg", ""),
+                        profile.get("gc_picture", ""))
+    light_ink = 0.299 * ink[0] + 0.587 * ink[1] + 0.114 * ink[2] > 140
+    unit = h / BACK_HEIGHT                              # sizes below are for a 1400 px high back
+    pad, y = round(w * 0.06), round(h * 0.035)
+    logo = pics.logo if profile.get("back_logo", True) else None
+    if logo is not None:
+        top = _fit(logo, w - 2 * pad, h * 0.11)
+    else:
+        top = _fit(title_picture(ctx.get("title", ""), ink, w * 0.8), w - 2 * pad, h * 0.09, grow=False)
+    img.alpha_composite(top, ((w - top.width) // 2, y))
+    y += top.height + round(h * 0.03)
+    details = [" · ".join(v for v in (ctx.get("publisher", ""), ctx.get("developer", "")) if v),
+               " · ".join(v for v in (ctx.get("year", ""), ctx.get("genre", "").replace(";", ",")) if v),
+               " · ".join(v for v in ((f"{ctx['players']} players" if ctx.get("players") else ""),
+                                      ctx.get("rating", "")) if v)]
+    details = [d for d in details if d] if profile.get("back_details", True) else []
+    foot = round(h * 0.12) if details or profile.get("back_platform", True) else 0
+    bottom = h - round(h * 0.035) - foot
+    shots = pics.shots[:max(0, int(profile.get("back_shots", 3)))]
+    rim, gap = max(2, round(4 * unit)), round(min(w, h) * 0.025)
+
+    def put(shot, x, top_y, cw, ch):
+        pic = ImageOps.fit(shot.convert("RGB"), (max(2, round(cw)), max(2, round(ch))), LANCZOS)
+        frame = Image.new("RGBA", (pic.width + 2 * rim, pic.height + 2 * rim),
+                          (24, 26, 30, 255) if light_ink else (255, 255, 255, 255))
+        frame.paste(pic, (rim, rim))
+        shadow = Image.new("RGBA", (frame.width + 8 * rim, frame.height + 8 * rim), (0, 0, 0, 0))
+        shadow.paste((0, 0, 0, 90), (4 * rim, 4 * rim, 4 * rim + frame.width, 4 * rim + frame.height))
+        img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(2 * rim)), (round(x) - 3 * rim, round(top_y) - 2 * rim))
+        img.alpha_composite(frame, (round(x) - rim, round(top_y) - rim))
+
+    text_x, text_w = pad, w - 2 * pad
+    if w > h * 1.15:                                    # a wide back: screenshots down the left, text on the right
+        col = (w - 3 * pad) * 0.42
+        if shots:
+            n = len(shots)
+            ch = min((bottom - y - (n - 1) * gap) / n, col * 0.75)
+            cw = ch / 0.75
+            for i, shot in enumerate(shots):
+                put(shot, pad + (col - cw) / 2, y + i * (ch + gap), cw, ch)
+            text_x, text_w = round(2 * pad + col), round(w - 3 * pad - col)
+    elif shots:                                         # else a row of them under the title
+        n = len(shots)
+        cw = (w - 2 * pad - (n - 1) * gap) / n
+        ch = min(cw * 0.75, h * (0.24 if n > 1 else 0.30))
+        cw = ch / 0.75
+        x = (w - (n * cw + (n - 1) * gap)) / 2
+        for shot in shots:
+            put(shot, x, y, cw, ch)
+            x += cw + gap
+        y += round(ch) + rim + round(h * 0.035)
+    notes = ctx.get("notes", "") if profile.get("back_notes", True) else ""
+    if notes.strip() and bottom - y > h * 0.08:
+        inner = round(min(w, h) * 0.025)
+        panel = Image.new("RGBA", (text_w + 2 * inner, bottom - y), (0, 0, 0, 120) if light_ink
+                          else (255, 255, 255, 150))
+        img.alpha_composite(panel, (text_x - inner, y))
+        img.alpha_composite(text_block(notes, (text_w, bottom - y - 2 * inner), ink, "Arial", 40 * unit, 19 * unit),
+                            (text_x, y + inner))
+    if foot:
+        x = pad
+        if profile.get("back_platform", True):
+            plat = gc_platform_logo(profile, ctx)
+            if plat is None:
+                plat = drawn_platform_logo(*gc_names(profile, ctx), ink)
+            plat = _fit(plat, w * 0.30, foot * 0.75)
+            img.alpha_composite(plat, (pad, bottom + (foot - plat.height) // 2 + round(h * 0.01)))
+            x = pad + plat.width + round(w * 0.04)
+        if details:
+            block = text_block("\n".join(details), (w - pad - x, foot * 0.9), ink, "Arial Bold", 26 * unit, 15 * unit,
+                               single=True)
+            img.alpha_composite(block, (x, bottom + round(h * 0.015)))
+    return img
+
+
+def render_back(profile: dict, pics, height=None):
+    """The back cover made for one game, as high as asked."""
+    return make_back(profile, pics, back_size(profile, pics, height))
+
+
+def made_here(path) -> bool:
+    """Was this picture made by this program (its Software mark)? A scan is not."""
+    try:
+        with Image.open(path) as im:
+            mark = str(im.info.get("Software", "")) or str(im.getexif().get(0x0131, ""))
+    except (OSError, ValueError):
+        return False
+    return mark.startswith(APP_NAME)
+
+
 def case_window(face: str, size, rim_frac: float):
     """Where the art sits inside a keep case's rim on a w x h face: (x0, y0, x1, y1)."""
     w, h = size
@@ -2253,7 +2426,7 @@ def _box_edges(base, quads, case_style: bool) -> None:
 # ------------------------------------------------------------------------------------------------- LaunchBox data
 class Game:
     __slots__ = ("title", "gid", "platform", "region", "year", "developer", "publisher", "genre", "series", "version",
-                 "key", "db_id")
+                 "key", "db_id", "notes", "players", "rating")
 
     def __init__(self, el, platform):
         def text(tag):
@@ -2269,12 +2442,16 @@ class Game:
         self.series = text("Series")
         self.version = text("Version")
         self.db_id = text("DatabaseID")
+        self.notes = text("Notes")[:NOTES_KEPT]           # the description, for a made back cover
+        self.players = text("MaxPlayers")
+        self.rating = text("Rating")
         self.key = clean_name(self.title).casefold()
 
     def context(self) -> dict:
         return {"title": self.title, "platform": self.platform, "year": self.year, "developer": self.developer,
                 "publisher": self.publisher, "region": self.region, "genre": self.genre, "series": self.series,
-                "version": self.version}
+                "version": self.version, "players": "" if self.players in ("", "0") else self.players,
+                "rating": self.rating, "notes": self.notes}
 
 
 class MediaIndex:
@@ -2464,6 +2641,7 @@ class LaunchBox:
         found["box3d"] = [item[2] for item in self.index(platform, OUT_TYPE).all(game)]
         found["disc"] = [item[2] for item in self.index(platform, DISC_TYPE).all(game)]
         found["cart3d"] = [item[2] for item in self.index(platform, CART_TYPE).all(game)]
+        found["back"] = [item[2] for item in self.index(platform, BACK_TYPE).all(game)]
         return found
 
 
@@ -2483,9 +2661,22 @@ def find_launchbox() -> str:
 
 
 def load_pictures(lb: LaunchBox, platform: str, game: Game, profile: dict, found: dict | None = None,
-                  limit: int = 3000, cart: bool = True) -> tuple[Pictures, dict]:
+                  limit: int = 3000, cart: bool = True, back: bool = False) -> tuple[Pictures, dict]:
     found = found if found is not None else lb.find(platform, game, profile)
     pics = Pictures(ctx=dict(game.context(), lb_platform=platform, platform_logo=platform_logo_file(lb.root, platform)))
+    if back:                                             # screenshots for a back cover: gameplay first, no two alike
+        paths = [item[2] for kind in SHOT_TYPES for item in lb.index(platform, kind).all(game)]
+        wanted = max(0, int(profile.get("back_shots", 3)))
+        for path in paths[:12]:
+            if len(pics.shots) >= wanted:
+                break
+            try:
+                shot = load_picture(path, 900)
+            except (OSError, ValueError, Image.DecompressionBombError) as exc:
+                log_line(f"cannot open {path}: {exc}")
+                continue
+            if not any(_looks_alike(shot, kept, 6.0) for kept in pics.shots):
+                pics.shots.append(shot)
     for key in ("front", "spine", "full", "logo", "marquee") + (("cart_front",) if cart else ()):
         path = found.get(key)
         if path:
@@ -2901,6 +3092,8 @@ def output_target(lb: LaunchBox, platform: str, game: Game, found: dict, export:
     ext = ".jpg" if export.get("format", "png") == "jpg" else ".png"
     base = clean_name(game.title)
     existing = found.get(MEDIA_KEYS.get(media_type, "box3d")) or []
+    if media_type == BACK_TYPE and existing and not all(made_here(p) for p in existing):
+        return None                                      # a scanned Box - Back is never replaced, nor added to
     policy = export.get("existing", "skip")
     if existing and policy == "skip":
         return None
@@ -2935,8 +3128,8 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
     """Make and save the Box - 3D, the Disc and / or the Cart - 3D of many games (several threads). A game with no
     Box - Front gets its cover from the web first when the settings say so, else a generic cover; a cartridge needs
     the game's Cart - Front. Returns counts of what happened."""
-    counts = {"saved": 0, "discs": 0, "carts": 0, "cartcovers": 0, "covers": 0, "generic": 0, "skipped": 0,
-              "nofront": 0, "nocart": 0, "errors": 0, "dup": 0}
+    counts = {"saved": 0, "discs": 0, "carts": 0, "cartcovers": 0, "backs": 0, "covers": 0, "generic": 0,
+              "skipped": 0, "nofront": 0, "nocart": 0, "errors": 0, "dup": 0}
     targets, lock = set(), threading.Lock()
     fmt = export.get("format", "png")
     max_h = int(export.get("max_height") or 0)
@@ -2969,7 +3162,7 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
                 plan = [(kind, target) for kind, target in plan if kind != CART_TYPE]
                 if not plan:
                     return done_here, game, ""
-            if needs_front and not found.get("front") and any(kind != CART_TYPE for kind, _t in plan):
+            if needs_front and not found.get("front") and any(kind in FRONT_KINDS for kind, _t in plan):
                 try:
                     cover, info = fetch_missing_cover(lb, platform, game, profile, found)
                 except (OSError, ValueError, http.client.HTTPException) as exc:    # the web is out of reach
@@ -2980,11 +3173,12 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
                     done_here.append("generic")
                 else:
                     done_here.append("nofront")
-                    plan = [(kind, target) for kind, target in plan if kind == CART_TYPE]
+                    plan = [(kind, target) for kind, target in plan if kind not in FRONT_KINDS]
                     if not plan:
                         return done_here, game, info
             pics, _ = load_pictures(lb, platform, game, profile, found,
-                                    cart=any(kind == CART_TYPE for kind, _t in plan))
+                                    cart=any(kind == CART_TYPE for kind, _t in plan),
+                                    back=any(kind == BACK_TYPE for kind, _t in plan))
             for kind, (path, region, replaced) in plan:
                 if not claim(path):
                     done_here.append("dup")
@@ -3003,6 +3197,8 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
                         done_here.append("cartcovers")           # made from the cover on the platform's cartridge
                     out = finish_picture(img, max_h, bool(export.get("trim", True)), fmt,
                                          export.get("jpg_bg", "#ffffff"))
+                elif kind == BACK_TYPE:
+                    out = finish_picture(render_back(profile, pics), 0, False, fmt, export.get("jpg_bg", "#ffffff"))
                 else:
                     img, _ = render_box(profile, template, quads, pics, height=height)
                     out = finish_picture(img, max_h, bool(export.get("trim", True)), fmt,
@@ -3045,13 +3241,14 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
 
 
 ABORT_IN_A_ROW, ABORT_SHARE = 10, 0.20
-MADE_COUNTS = {OUT_TYPE: "saved", DISC_TYPE: "discs", CART_TYPE: "carts"}
+MADE_COUNTS = {OUT_TYPE: "saved", DISC_TYPE: "discs", CART_TYPE: "carts", BACK_TYPE: "backs"}
 
 
 def made_kinds(export: dict) -> list:
     """The kinds of picture the Save tab's "What to make" asks for."""
     return [kind for kind, on in ((OUT_TYPE, export.get("make_box", True)), (DISC_TYPE, export.get("make_disc", False)),
-                                  (CART_TYPE, export.get("make_cart", False))) if on]
+                                  (CART_TYPE, export.get("make_cart", False)), (BACK_TYPE, export.get("make_back", False)))
+            if on]
 
 
 def batch_plan(found_list, existing: str = "skip", need_front: bool = True, generic: bool = False,
@@ -3061,7 +3258,7 @@ def batch_plan(found_list, existing: str = "skip", need_front: bool = True, gene
     Box - Front: a cover from the web or a generic one). cart_cover: games without a Cart - Front get one from their
     Box - Front."""
     make = skip = nofront = covers = 0
-    boxes = [k for k in kinds if k != CART_TYPE]
+    boxes = [k for k in kinds if k in FRONT_KINDS]
     for found in found_list:
         missing = need_front and bool(boxes) and not found.get("front")
         blocked = missing and not (generic or web)         # no Box - Front and nothing to make one from
@@ -3070,9 +3267,11 @@ def batch_plan(found_list, existing: str = "skip", need_front: bool = True, gene
         has_cart = found.get("cart_front") or cart_cover and found.get("front")
         if CART_TYPE in kinds and has_cart and not cart_there:
             todo.append(CART_TYPE)
+        if BACK_TYPE in kinds and not found.get("back"):      # (a back already there is kept: a scan, most likely)
+            todo.append(BACK_TYPE)
         if todo:
             make += 1
-            covers += missing and any(k != CART_TYPE for k in todo)
+            covers += missing and any(k in FRONT_KINDS for k in todo)
         elif blocked or CART_TYPE in kinds and not has_cart and not cart_there:
             nofront += 1
         else:
@@ -3094,10 +3293,15 @@ def save_picture(img, path: Path, replaced, backup_root: Path | None, lb_root: P
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(old, dest)
     tmp = path.with_name(path.name + ".tmp")
+    mark = f"{APP_NAME} {APP_VERSION}"                  # tells the program's own pictures from scans (made_here)
     if fmt == "jpg":
-        img.save(tmp, "JPEG", quality=93, optimize=True)
+        exif = Image.Exif()
+        exif[0x0131] = mark
+        img.save(tmp, "JPEG", quality=93, optimize=True, exif=exif)
     else:
-        img.save(tmp, "PNG", compress_level=6)
+        info = PngImagePlugin.PngInfo()
+        info.add_text("Software", mark)
+        img.save(tmp, "PNG", compress_level=6, pnginfo=info)
     os.replace(tmp, path)
     for old in replaced or []:
         if Path(old) != path and os.path.isfile(old):
@@ -4096,11 +4300,12 @@ TEXTS = {
     "profile_export": "Save settings to a file…", "profile_import": "Load settings from a file…",
     "profile_reset": "Restore factory settings", "log_section": "Log",
     "stop": "■ Stop", "ready": "Ready.",
-    "batch_progress": "{done}/{total} · 3D {saved} · discs {discs} · carts {carts} · web covers {covers} · generic "
-                      "{generic} · skipped {skipped} · errors {errors}",
+    "batch_progress": "{done}/{total} · 3D {saved} · discs {discs} · carts {carts} · backs {backs} · web covers "
+                      "{covers} · generic {generic} · skipped {skipped} · errors {errors}",
     "batch_done": "Done ({platform}): Box - 3D {saved}, discs {discs}, Cart - 3D {carts} ({cartcovers} from covers), "
-                  "covers from the web {covers}, generic covers {generic}, skipped (all there) {skipped}, no Box - Front "
-                  "{nofront}, no Cart - Front {nocart}, repeated titles {dup}, errors {errors}.",
+                  "Box - Back {backs}, covers from the web {covers}, generic covers {generic}, skipped (all there) "
+                  "{skipped}, no Box - Front {nofront}, no Cart - Front {nocart}, repeated titles {dup}, errors "
+                  "{errors}.",
     "batch_stopped": "Stopped.",
     "confirm_batch": "Make pictures for {n} games?\n\nPlatform: {platform}\nMaking: {what}\nBox: {template}\n"
                      "When the picture is there: {policy}\nFolder: {folder}\n\n"
@@ -4144,6 +4349,19 @@ TEXTS = {
     "disc_note": "Discs are saved as LaunchBox's “Disc” pictures (Save tab: What to make). A game with no Box - Front "
                  "gets a disc from its generic cover.",
     "what_section": "1. What to make", "make_box": "Box - 3D", "make_disc": "Disc", "make_cart": "Cart - 3D",
+    "make_back": "Box - Back",
+    "tab_back": "Back", "view_back": "Back", "back_section": "1. On the back",
+    "back_logo": "The game's Clear Logo at the top (else its title)", "back_shots": "Screenshots",
+    "back_notes": "The game's description (LaunchBox's notes)",
+    "back_details": "Publisher, developer, year, genre, players, rating",
+    "back_platform": "The platform's logo", "back_height": "Height (px)",
+    "back_note": "A Box - Back is made only for a game that has none, from its LaunchBox data and screenshots, on "
+                 "the generic cover's ground and colours (Artwork tab). A scanned back is never replaced; backs this "
+                 "program made can be made again with Replace.",
+    "back_show": "👁 Show the back in the preview",
+    "help_back": "The Back tab sets the back cover · wheel: zoom · right button: pan · double click: fit",
+    "info_back": "Box - Back", "back_own": "yes (a scan or other picture)", "back_made": "made by this program",
+    "filter_noback": "Without Box - Back", "filter_hasback": "With Box - Back", "gal_back": "Box - Back",
     "disc_show": "👁 Show the disc in the preview",
     "tab_cart": "Cart", "view_cart": "Cart",
     "cart_shape_section": "1. Shape", "cart_turn": "Turn", "cart_tilt": "Seen from above",
@@ -4175,7 +4393,7 @@ TEXTS = {
                      "with the sliders. Each game without a Cart - Front then gets its Box - Front on that label.",
     "cart_from_cover": "made from the cover", "cart_donor_set": "Cartridge for the covers: {path}",
     "cart_use_none": "This game has no Cart - Front to use: pick a game that has one, or choose a picture.",
-    "nothing_chosen": "Choose what to make (Box - 3D, Disc or Cart - 3D) at the top of the Save tab.",
+    "nothing_chosen": "Choose what to make (Box - 3D, Disc, Cart - 3D or Box - Back) at the top of the Save tab.",
     "nothing_to_make": "Nothing to make: of {n} games, {skip} already have what was asked for and {nofront} have "
                        "nothing to make it from (no Box - Front, or no Cart - Front for a cartridge).",
     "aborted_in_a_row": "Stopped after {n} errors in a row — see the log (disk full? folder gone?).",
@@ -4260,7 +4478,7 @@ def load_config() -> dict:
            "default_profile": None, "custom_templates": [],
            "export": {"region": "same", "existing": "skip", "format": "png", "jpg_bg": "#ffffff", "max_height": 1000,
                       "trim": True, "threads": max(1, min(6, (os.cpu_count() or 4) - 1)), "make_box": True,
-                      "make_disc": False, "make_cart": False},
+                      "make_disc": False, "make_cart": False, "make_back": False},
            "display": {"guides": True, "hq": True}, "ai": {}, "gallery": {}}
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -4555,7 +4773,7 @@ class App:
             self.update_info()
         if scope == "export":
             self.update_output_label()
-            if key in ("make_box", "make_disc", "make_cart"):
+            if key in ("make_box", "make_disc", "make_cart", "make_back"):
                 self.update_info()
         if scope == "profile" and key == "cart_depth_auto":
             self.update_platform_labels()
@@ -4698,7 +4916,8 @@ class App:
         row = tk.Frame(body2, bg=PANEL2)
         row.pack(fill="x", pady=(6, 0))
         self.label(row, self.t("show")).pack(side="left")
-        self.filter_keys = ["all", "missing", "has", "nofront", "nodisc", "hasdisc", "nocart", "hascart"]
+        self.filter_keys = ["all", "missing", "has", "nofront", "nodisc", "hasdisc", "nocart", "hascart", "noback",
+                            "hasback"]
         self.filter_var = tk.StringVar(value=self.t("filter_" + getattr(self, "filter_mode", "all")))
         combo = ttk.Combobox(row, textvariable=self.filter_var, state="readonly",
                              values=[self.t("filter_" + k) for k in self.filter_keys])
@@ -4734,7 +4953,7 @@ class App:
         bar.pack(fill="x", pady=(0, 4))
         self.view_buttons = {}
         for key, text in (("3d", "view_3d"), ("front", "view_front"), ("spine", "view_spine"), ("disc", "view_disc"),
-                          ("cart", "view_cart")):
+                          ("cart", "view_cart"), ("back", "view_back")):
             b = self.button(bar, self.t(text), lambda k=key: self.set_view(k), "blue" if self.view == key else "normal")
             b.pack(side="left", padx=(0, 4))
             self.view_buttons[key] = b
@@ -4766,7 +4985,7 @@ class App:
         self.notebook = ttk.Notebook(parent)
         self.notebook.pack(fill="both", expand=True, padx=4, pady=4)
         tabs = {}
-        for key in ("tab_template", "tab_art", "tab_text", "tab_disc", "tab_cart", "tab_export"):
+        for key in ("tab_template", "tab_art", "tab_text", "tab_disc", "tab_cart", "tab_back", "tab_export"):
             outer, inner = self.scrollable(self.notebook)
             self.notebook.add(outer, text=self.t(key))
             tabs[key] = inner
@@ -4775,6 +4994,7 @@ class App:
         self.build_text_tab(tabs["tab_text"])
         self.build_disc_tab(tabs["tab_disc"])
         self.build_cart_tab(tabs["tab_cart"])
+        self.build_back_tab(tabs["tab_back"])
         self.build_export_tab(tabs["tab_export"])
         tab = self.options.get("tab")
         if tab is not None:
@@ -5257,11 +5477,28 @@ class App:
         self.bind_var(var, "profile", "cart_label_fit", str)
         self.label(body, self.t("cart_gen_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(8, 0))
 
+    def build_back_tab(self, parent):
+        body = self.section(parent, self.t("back_section"))
+        for key in ("back_logo", "back_notes", "back_details", "back_platform"):
+            var = tk.BooleanVar()
+            self.check(body, self.t(key), var).pack(fill="x")
+            self.bind_var(var, "profile", key, bool)
+        self.slider(body, self.t("back_shots"), "profile", "back_shots", 0, 4, 1, lambda v: f"{v:.0f}", 3)
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(8, 0))
+        self.label(row, self.t("back_height")).pack(side="left")
+        var = tk.IntVar()
+        tk.Spinbox(row, from_=400, to=4000, increment=100, textvariable=var, width=7, bg=ENTRY, fg=FG,
+                   buttonbackground=PANEL2, relief="flat", insertbackground=FG).pack(side="right")
+        self.bind_var(var, "profile", "back_height", int)
+        self.label(body, self.t("back_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(8, 0))
+        self.button(body, self.t("back_show"), lambda: self.set_view("back")).pack(anchor="w", pady=(6, 0))
+
     def build_export_tab(self, parent):
         body = self.section(parent, self.t("what_section"))
         row = tk.Frame(body, bg=PANEL2)
         row.pack(fill="x")
-        for key in ("make_box", "make_disc", "make_cart"):
+        for key in ("make_box", "make_disc", "make_cart", "make_back"):
             var = tk.BooleanVar()
             self.check(row, self.t(key), var).pack(side="left", padx=(0, 18))
             self.bind_var(var, "export", key, bool)
@@ -5521,6 +5758,8 @@ class App:
                 continue
             if mode == "nocart" and f.get("cart3d") or mode == "hascart" and not f.get("cart3d"):
                 continue
+            if mode == "noback" and f.get("back") or mode == "hasback" and not f.get("back"):
+                continue
             rows.append(i)
         col, desc = self.sort
         index = COLUMNS.index(col)
@@ -5611,7 +5850,7 @@ class App:
 
         def work():
             try:
-                pics, found = load_pictures(lb, name, game, profile, limit=1600)
+                pics, found = load_pictures(lb, name, game, profile, limit=1600, back=True)
                 self.queue.put(("pics", token, game, pics, found, None))
             except Exception as exc:  # noqa: BLE001
                 self.queue.put(("pics", token, game, None, {}, f"{type(exc).__name__}: {exc}"))
@@ -5682,6 +5921,10 @@ class App:
                 source = self.t("src_none")
             parts.append(f"{self.t('info_cart_front')}: {source}")
             parts.append(f"{self.t('info_cart')}: " + (self.t("has3d", n=ncart) if ncart else self.t("no3d")))
+        if f.get("back") or self.view == "back" or self.cfg["export"].get("make_back"):
+            backs = f.get("back") or []
+            state = self.t("no3d") if not backs else self.t("back_made") if made_here(backs[0]) else self.t("back_own")
+            parts.append(f"{self.t('info_back')}: {state}")
         self.info_label.configure(text="   ·   ".join(parts))
 
     # ------------------------------------------------------------------------------------------- templates
@@ -6300,7 +6543,8 @@ class App:
         for key, b in self.view_buttons.items():
             b.configure(bg=BLUE if key == view else "#1b3550", fg="white" if key == view else FG)
         if hasattr(self, "help_label"):
-            self.help_label.configure(text=self.t({"disc": "help_disc", "cart": "help_cart"}.get(view, "help")))
+            self.help_label.configure(text=self.t({"disc": "help_disc", "cart": "help_cart", "back": "help_back"}
+                                                  .get(view, "help")))
         self.zoom, self.pan = 1.0, [0.0, 0.0]
         self.update_info()
         self.request_draw()
@@ -6367,6 +6611,9 @@ class App:
                 img = render_cart(self.profile, pics, self.platform, 400 if fast else
                                   max(200, min(1000, round(ch - m))), fast)
                 used, scale = {}, 1.0
+            elif self.view == "back":
+                img = render_back(self.profile, pics, 500 if fast else max(300, min(1400, round(ch - m))))
+                used, scale = {}, 1.0
             else:
                 img, used = render_box(self.profile, self.template_img, self.quads, pics, height=height,
                                        scale=max(0.05, scale), ss=1 if fast or not hq else 2, fast=fast)
@@ -6379,7 +6626,7 @@ class App:
             c.create_text(cw // 2, ch // 2, text=self.t("no_cart_front" if self.view == "cart" else "no_front_pic"),
                           fill=MUTED, font=ui_font(12), width=cw - 40)
             return
-        if self.view in ("disc", "cart"):
+        if self.view in ("disc", "cart", "back"):
             disp = min((cw - m) / img.width, (ch - m) / img.height) * self.zoom
         elif self.view in ("front", "spine"):
             quad = used.get(self.view)
@@ -6542,8 +6789,8 @@ class App:
         game, profile, template, quads, export = (self.current,) + self.batch_settings()
         overrides = dict(self.overrides)
         lb, name = self.lb, self.platform
-        if to_file:          # the picture shown: the disc or the cartridge in their views, else the box
-            kinds = [{"disc": DISC_TYPE, "cart": CART_TYPE}.get(self.view, OUT_TYPE)]
+        if to_file:          # the picture shown: the disc, cartridge or back in their views, else the box
+            kinds = [{"disc": DISC_TYPE, "cart": CART_TYPE, "back": BACK_TYPE}.get(self.view, OUT_TYPE)]
         else:
             kinds = made_kinds(export)
         if not kinds:
@@ -6555,7 +6802,7 @@ class App:
                 messagebox.showwarning(APP_NAME, self.t("no_cart_front"), parent=self.root)
                 return
             kinds = [kind for kind in kinds if kind != CART_TYPE]
-        needs_front = profile["faces"]["front"].get("source") == "launchbox" and any(k != CART_TYPE for k in kinds)
+        needs_front = profile["faces"]["front"].get("source") == "launchbox" and any(k in FRONT_KINDS for k in kinds)
         if needs_front and not (self.current_found.get("front") or "front" in overrides) and not profile.get(
                 "generic_cover", True) and profile.get("web_covers", "auto") == "off":
             messagebox.showwarning(APP_NAME, self.t("no_front"), parent=self.root)
@@ -6595,7 +6842,7 @@ class App:
                     if not found.get("front") and not profile.get("generic_cover", True):
                         self.queue.put(("saved", index, [], bool(dest), self.t("no_front"), found))
                         return
-                pics, _ = load_pictures(lb, name, game, profile, found)
+                pics, _ = load_pictures(lb, name, game, profile, found, back=BACK_TYPE in kinds)
                 if "front" in overrides:
                     pics.front = overrides["front"]
                 if "spine" in overrides:
@@ -6614,6 +6861,8 @@ class App:
                             continue
                         out = finish_picture(img, int(export.get("max_height") or 0), bool(export.get("trim", True)),
                                              fmt, export.get("jpg_bg", "#ffffff"))
+                    elif kind == BACK_TYPE:
+                        out = finish_picture(render_back(profile, pics), 0, False, fmt, export.get("jpg_bg", "#ffffff"))
                     else:
                         img, _ = render_box(profile, template, quads, pics, height=height)
                         out = finish_picture(img, int(export.get("max_height") or 0), bool(export.get("trim", True)),
@@ -6660,7 +6909,7 @@ class App:
         if not kinds:
             self.inform(self.t("nothing_chosen"))
             return
-        needs_front = profile["faces"]["front"].get("source") == "launchbox" and any(k != CART_TYPE for k in kinds)
+        needs_front = profile["faces"]["front"].get("source") == "launchbox" and any(k in FRONT_KINDS for k in kinds)
         where = web_source(self.platform, self.lb.official.get(self.platform, ""), profile.get("web_covers", "auto"),
                            profile.get("web_system", "")) if needs_front else ""
         web = bool(where)
@@ -6677,8 +6926,8 @@ class App:
                 "confirm_missing_generic" if generic else "confirm_missing_end")
         elif covers:
             extra = self.t("confirm_missing_only_generic", generic=covers)
-        what = " + ".join(self.t({OUT_TYPE: "make_box", DISC_TYPE: "make_disc", CART_TYPE: "make_cart"}[kind])
-                          for kind in kinds)
+        what = " + ".join(self.t({OUT_TYPE: "make_box", DISC_TYPE: "make_disc", CART_TYPE: "make_cart",
+                                  BACK_TYPE: "make_back"}[kind]) for kind in kinds)
         folders = "\n".join(str(self.lb.media_folder(self.platform, kind)) for kind in kinds)
         if not self.options.get("yes") and not messagebox.askyesno(APP_NAME, self.t(
                 "confirm_batch", n=len(idx), platform=self.platform, what=what, template=tname, policy=policy,
@@ -7066,7 +7315,8 @@ class Gallery:
     def __init__(self, app):
         self.app, self.t, self.px = app, app.t, app.px
         s = app.cfg.setdefault("gallery", {})
-        self.kind_var = tk.StringVar(value=s.get("kind") if s.get("kind") in ("box3d", "disc", "cart3d") else "box3d")
+        self.kind_var = tk.StringVar(value=s.get("kind") if s.get("kind") in ("box3d", "disc", "cart3d", "back")
+                                     else "box3d")
         self.size_var = tk.StringVar(value=s.get("size") if s.get("size") in self.SIZES else "medium")
         self.items: list = []           # (game number, picture path, how many such pictures the game has)
         self.missing = 0
@@ -7108,8 +7358,8 @@ class Gallery:
 
         bar = tk.Frame(win, bg=PANEL)
         bar.pack(fill="x", padx=8, pady=(8, 0))
-        for var, choices, command in ((self.kind_var, (("box3d", "gal_box"), ("disc", "gal_disc"), ("cart3d", "gal_cart")),
-                                       self.on_kind),
+        for var, choices, command in ((self.kind_var, (("box3d", "gal_box"), ("disc", "gal_disc"), ("cart3d", "gal_cart"),
+                                                       ("back", "gal_back")), self.on_kind),
                                       (self.size_var, (("small", "gal_small"), ("medium", "gal_medium"),
                                                        ("large", "gal_large")), self.on_size)):
             group = tk.Frame(bar, bg=PANEL)
@@ -7177,7 +7427,8 @@ class Gallery:
 
     def layout(self):
         th = self.px(self.SIZES[self.size_var.get()])
-        tw = {"disc": th, "cart3d": round(th * 1.25)}.get(self.kind_var.get(), round(th * 0.78))
+        tw = {"disc": th, "cart3d": round(th * 1.25), "back": round(th * 0.72)}.get(self.kind_var.get(),
+                                                                                     round(th * 0.78))
         pad, cap = self.px(6), self.px(20)
         self.thumb = (tw, th)
         self.cell = (tw + 2 * pad, th + cap + 2 * pad)
@@ -7219,7 +7470,7 @@ class Gallery:
         c = self.canvas
         c.delete("empty")
         if not self.items:
-            kind = self.t({"disc": "gal_disc", "cart3d": "gal_cart"}.get(self.kind_var.get(), "gal_box"))
+            kind = self.t({"disc": "gal_disc", "cart3d": "gal_cart", "back": "gal_back"}.get(self.kind_var.get(), "gal_box"))
             c.create_text(max(40, c.winfo_width()) // 2, self.px(60), text=self.t("gal_empty", kind=kind), fill=MUTED,
                           font=ui_font(11), tags="empty")
             return
@@ -8452,6 +8703,10 @@ def selftest(report: str) -> int:
                                                            "cart_label_b"), label))), front)
             check("cartridge from a cover", on_label is not None and on_label.size == shell.size
                   and abs(label[0] - 90 / 400) < 0.03, f"label {tuple(round(v, 3) for v in label)}")
+        back = render_back(default_profile(), Pictures(front=front.convert("RGBA"), ctx={
+            "title": "Combat", "notes": "Tanks, biplanes and jets in 27 games.", "publisher": "Atari", "year": "1977"}),
+            700)
+        check("back cover", back.height == 700 and back.getchannel("A").getextrema() == (255, 255), str(back.size))
         check("UMD", umd.size == (400, round(400 * UMD_HEIGHT)) and umd.getpixel((200, 200))[3] == 255
               and umd.getpixel((0, 0))[3] == 0 and umd.getpixel((4, umd.height - 4))[3] == 0,
               f"kind {disc_kind(default_profile(), 'Sony PSP')}")
