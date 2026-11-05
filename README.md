@@ -2,7 +2,8 @@
 
 3D boxes for a LaunchBox library: it makes the **Box - 3D** picture of LaunchBox games from their **Box - Front** /
 **Box - Spine** pictures and saves it where LaunchBox looks for it, one game at a time or a whole platform at once.
-It makes **discs** (LaunchBox's *Disc* pictures) from the same covers, looks for missing covers on the web
+It makes **discs** (LaunchBox's *Disc* pictures) from the same covers and **cartridges** in 3D (*Cart - 3D*) from
+photos of the cartridges (*Cart - Front*), looks for missing covers on the web
 (libretro-thumbnails, Steam), can make small covers sharper with an AI upscale model, cuts a scanner's thin edges off
 covers, gives games with no cover at all a generic one, shows a platform's boxes in a **gallery** to find bad ones, and
 has new case templates painted by a local Stable Diffusion. One Python file (tkinter + Pillow), built into one exe
@@ -19,7 +20,7 @@ the new pictures into its `Images` folders.
 | `lb_box3d_creator.py` | the whole program |
 | `box model\` | case templates, each with its corner file `.json` (a box3d profile): `AI *.png`, painted with this program's AI window, and the 3 of [box3d](https://github.com/RtaSistemas/box3d) (`box3d-mvs/arcade/dvd.png`, MIT, see `box3d-LICENSE.txt`); also built into the exe |
 | `build.bat` | builds `dist\LB3DBoxCreator-<version>.exe` (`--onefile --windowed --noupx`), copies `box model`, runs the exe's self-test |
-| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
+| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
 
 ## Using it
 
@@ -28,10 +29,11 @@ the new pictures into its `Images` folders.
    entries (so platforms that share another platform's folders work).
 2. **Platform** (type part of its name to narrow the list), then a game. The list shows for each game: **Front**
    (✓ Box - Front, ≈ only Box - Front - Reconstructed / Fanart - Box - Front), **Spine** (✓ Box - Spine, F only a
-   Box - Full), **3D** and **Disc** (how many Box - 3D / Disc pictures it has); a click on a column's name sorts by
-   it. **Show** narrows it to games without / with a Box - 3D, without / with a Disc, or without a front; **Search**
-   by title. Very big platforms show the first 5000 rows (the buttons still work on all).
-   **▦ Gallery of the games in the list…** shows the Box - 3D (or Disc) pictures of the games in the list side by
+   Box - Full), **3D** and **Disc** (how many Box - 3D / Disc pictures it has; on a platform with cartridge photos
+   the last column is **Cart**, its Cart - 3D pictures); a click on a column's name sorts by it. **Show** narrows it to
+   games without / with a Box - 3D, a Disc or a Cart - 3D, or without a front; **Search** by title. Very big platforms
+   show the first 5000 rows (the buttons still work on all).
+   **▦ Gallery of the games in the list…** shows the Box - 3D (or Disc, or Cart - 3D) pictures of the games in the list side by
    side, small / medium / large, in the list's order, so bad ones stand out. A click shows the game in the main
    window, a right click marks it as bad (red frame), a double click opens the picture. **Select the marked games in
    the list** selects them in the main list: then choose *Replace* on the Save tab and make the selected games again.
@@ -118,14 +120,23 @@ the new pictures into its `Images` folders.
    (`{title} · © {year} {publisher}`…; fields a game lacks are left out with their separators) at the top or bottom in
    a colour, the disc's size (1000 px; a UMD is that wide and 2 % higher). A game with no Box - Front gets a disc from
    its generic cover. **Disc** in the preview's view buttons shows it.
-7. **Save** tab: **What to make** (Box - 3D, Disc or both), **Save this game to LaunchBox**, **Export this game to a
-   file…** (the picture shown: the disc in the Disc view), or make them for the selected games / the games in the list
+7. **Cart** tab: the game's cartridge in 3D (LaunchBox's *Cart - 3D*), from its **Cart - Front**, which in LaunchBox is
+   a photo of the whole cartridge. The photo is the front, turned in perspective (**Turn**, **Seen from above**,
+   **Perspective**), and a side wall follows the cartridge's own outline in the colour of its plastic, on the left or
+   the right. Its **thickness** comes from the platform, as measured on the real cartridges (NES 17.5 % of the width,
+   SNES 15 %, Mega Drive / Genesis 18 %, N64 15.5 %, Game Boy 13.5 %, GBA 14 %, Atari 2600 25 %, DS 11 %, HuCard 4 %…,
+   16 % for others), or is set by hand. A photo with transparency (most of LaunchBox's) gives the cleanest outline; one
+   without loses its even background only when the cartridge can be told from it (not a grey cartridge on grey), else
+   it is used whole. A game without a Cart - Front gets no cartridge. **Cart** in the view buttons shows it.
+8. **Save** tab: **What to make** (Box - 3D, Disc, Cart - 3D, any of them), **Save this game to LaunchBox**, **Export
+   this game to a file…** (the picture shown: the disc or cartridge in their views), or make them for the selected
+   games / the games in the list
    / the whole platform (in several threads; **Stop** at any time). Before a run the program says how many games it
    will make pictures for, how many of them have no Box - Front (and where their covers will be looked for on the web,
    else a generic cover), skip and leave out; like box3d it stops by itself after 10 failures in a row or when more
    than 20 % fail (disk full, LaunchBox drive gone…).
 
-Views: 3D, Front 2D, Spine 2D (each side flattened), Disc; wheel = zoom, right button = pan, double click = fit.
+Views: 3D, Front 2D, Spine 2D (each side flattened), Disc, Cart; wheel = zoom, right button = pan, double click = fit.
 **Undo / Redo** (Ctrl+Z / Ctrl+Y) cover corners and settings. The interface is in English.
 
 ## AI templates (Stability Matrix)
@@ -177,7 +188,7 @@ pictures. The program never changes LaunchBox's XML files; LaunchBox shows the n
 image refresh).
 
 Discs go the same way into `<LaunchBox>\Images\<platform>\Disc\` (round PNG with a see-through hole, or the UMD's
-shell; not cut or height-limited). Covers found on the web go into `Box - Front\` as above.
+shell; not cut or height-limited), cartridges into `Cart - 3D\` (as high as a Box - 3D, transparent margins cut). Covers found on the web go into `Box - Front\` as above.
 
 Pictures are taken as LaunchBox would: the main folder first, then the game's region folder, then others; a
 Box - Spine only from the front's region folder (can be switched off), Box - Full checked against the front.

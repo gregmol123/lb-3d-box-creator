@@ -301,15 +301,16 @@ class Window(unittest.TestCase):
         self.assertTrue((self.lb.media_folder(PLATFORM, m.DISC_TYPE) / "Europe" / "First Game-01.png").is_file())
         self.assertTrue((self.lb.media_folder(PLATFORM, m.OUT_TYPE) / "Europe" / "First Game-01.png").is_file())
         self.assertTrue(self.wait(lambda: app.found[0].get("disc")), "disc not noted")
-        self.assertEqual((app.tree.set("0", "disc"), app.tree.set("1", "disc")), ("1", "–"))   # the Disc column
+        self.assertEqual((app.tree.set("0", "media"), app.tree.set("1", "media")), ("1", "–"))  # the Disc column
+        self.assertEqual(app.tree.heading("media")["text"], "Disc")
         self.assertIn("with Disc 1", app.plat_info["text"])
         for mode, rows in (("hasdisc", ("0",)), ("nodisc", ("1",)), ("all", ("0", "1"))):
             app.filter_var.set(m.TEXTS["filter_" + mode])
             app.on_filter_mode()
             self.assertEqual(app.tree.get_children(), rows, mode)
-        app.sort_by("disc")
+        app.sort_by("media")
         self.assertEqual(app.tree.get_children(), ("0", "1"))                  # "1" before "–"
-        app.sort_by("disc")
+        app.sort_by("media")
         self.assertEqual(app.tree.get_children(), ("1", "0"))
         app.sort_by("title")
         app.cfg["export"]["make_box"] = False
