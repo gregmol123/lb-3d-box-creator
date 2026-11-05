@@ -3,9 +3,10 @@
 3D boxes for a LaunchBox library: it makes the **Box - 3D** picture of LaunchBox games from their **Box - Front** /
 **Box - Spine** pictures and saves it where LaunchBox looks for it, one game at a time or a whole platform at once.
 It makes **discs** (LaunchBox's *Disc* pictures) from the same covers, looks for missing covers on the web
-(libretro-thumbnails, Steam), can make small covers sharper with an AI upscale model, gives games with no cover at all
-a generic one, and has new case templates painted by a local Stable Diffusion. One Python file (tkinter + Pillow),
-built into one exe with PyInstaller.
+(libretro-thumbnails, Steam), can make small covers sharper with an AI upscale model, cuts a scanner's thin edges off
+covers, gives games with no cover at all a generic one, shows a platform's boxes in a **gallery** to find bad ones, and
+has new case templates painted by a local Stable Diffusion. One Python file (tkinter + Pillow), built into one exe
+with PyInstaller.
 
 **Download:** the Windows exe is on the [Releases](https://github.com/gregmol123/lb-3d-box-creator/releases) page
 (`LB3DBoxCreator-<version>.exe`, no install; it puts its templates in a `box model` folder beside itself). Windows may
@@ -18,7 +19,7 @@ the new pictures into its `Images` folders.
 | `lb_box3d_creator.py` | the whole program |
 | `box model\` | case templates, each with its corner file `.json` (a box3d profile): `AI *.png`, painted with this program's AI window, and the 3 of [box3d](https://github.com/RtaSistemas/box3d) (`box3d-mvs/arcade/dvd.png`, MIT, see `box3d-LICENSE.txt`); also built into the exe |
 | `build.bat` | builds `dist\LB3DBoxCreator-<version>.exe` (`--onefile --windowed --noupx`), copies `box model`, runs the exe's self-test |
-| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
+| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
 
 ## Using it
 
@@ -30,6 +31,12 @@ the new pictures into its `Images` folders.
    Box - Full), **3D** and **Disc** (how many Box - 3D / Disc pictures it has); a click on a column's name sorts by
    it. **Show** narrows it to games without / with a Box - 3D, without / with a Disc, or without a front; **Search**
    by title. Very big platforms show the first 5000 rows (the buttons still work on all).
+   **▦ Gallery of the games in the list…** shows the Box - 3D (or Disc) pictures of the games in the list side by
+   side, small / medium / large, in the list's order, so bad ones stand out. A click shows the game in the main
+   window, a right click marks it as bad (red frame), a double click opens the picture. **Select the marked games in
+   the list** selects them in the main list: then choose *Replace* on the Save tab and make the selected games again.
+   The gallery follows the list (Show, Search, a new platform) and new pictures; its thumbnails are made in the
+   background and kept in the cache folder (`thumbs`, the newest 20,000), so it opens fast the next time.
 3. **Box** tab: the case, chosen per platform.
    * *Box drawn in perspective* (no template): a cardboard box or a plastic keep case (rim colour; presets for
      Xbox 360, PS4, PS2, Wii, Switch…), turn, perspective, thickness (taken from the spine picture's shape when there
@@ -89,6 +96,14 @@ the new pictures into its `Images` folders.
    A1111: their upscalers; ComfyUI: a model in `models\upscale_models`); **↻ Ask the AI server** lists its models,
    empty = a photo model is picked (never an anime one). Each cover is done once and kept in the cache folder; without
    a server or a model the cover stays as it is.
+   **Cut a scanner's thin white or black edge off the pictures** (on by default): scanned covers often keep a strip of
+   the scanner's white bed or black lid, which shows as a line along the box. The Box - Front, Box - Spine and Box -
+   Full lose a side's strip when it is one even white or black, thin (white up to 3 % of the picture, black up to 1 %,
+   or 3 % when black runs round all four sides, as on a black scanner lid) and the cover starts sharply after it.
+   Thicker even bands are part of the cover's design and stay: PlayStation's black top, the N64's PAL frame, the Wii's
+   white foot, SNES PAL frames (checked on 1200 covers of 12 platforms: it cut 40, almost all scanner edges, a few a
+   thin black line of the cover's own). Only the picture used for the box and disc is cut, never LaunchBox's file; the
+   info line says "scan edge cut". Switch it off for a platform whose covers have a thin even frame you want to keep.
 5. **Text / Logo** tab: texts with `{title} {year} {platform} {developer} {publisher} {region} {genre} {series}
    {version}` filled in for each game, logos from files, the game's own **Clear Logo** or **Arcade - Marquee**
    (each falls back to the other), per side, with position, size, rotation, opacity, colours. **Spine logo slots
@@ -173,7 +188,7 @@ Box - Spine only from the front's region folder (can be switched off), Box - Ful
 logos; *Use as default for new platforms*; *Save settings to a file…* / *Load settings from a file…* keep one
 platform's settings in a `.lb3d.json` file), corners per template, save options, the AI window's settings (`ai`). Log:
 `%USERPROFILE%\.lb_box3d_creator.log`. Cache: `%USERPROFILE%\.lb_box3d_creator_cache\` (libretro's folder lists, two
-weeks; upscaled covers); it can be deleted at any time.
+weeks; upscaled covers; the gallery's thumbnails in `thumbs`); it can be deleted at any time.
 
 ## Credits
 

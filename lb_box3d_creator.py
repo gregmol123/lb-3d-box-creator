@@ -41,7 +41,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -177,6 +177,93 @@ def load_picture(path, limit: int = 0):
     if limit and max(img.size) > limit * 1.5:
         img.thumbnail((limit, limit), LANCZOS)
     return img
+
+
+# ---------------------------------------------------------------------------------------------------- scan margins
+# Scanned covers often keep a thin strip of the scanner's white bed or black lid along their edges, which shows as a
+# line along the box. A side is cut when its edge is one even white or black, the strip is thin and, looking along the
+# middle half of the picture, the cover starts sharply after it, as a scanned edge does. Checked on 1200 real covers:
+# thicker even bands are the cover's design (PlayStation's black top, the N64's PAL frame, the Wii's white foot), and
+# so are black bands of more than about 1 % (SNES PAL frames, Saturn's foot), unless black runs round all four sides
+# (a cover scanned on a black lid). Only the picture used for the box is cut: LaunchBox's files stay as they are.
+TRIM_TOL = 32            # colour difference still counted as the margin (scanner noise, JPEG)
+TRIM_SPECKS = 0.02       # a line with less of other colours than this is still margin (dust)
+TRIM_EDGE = 0.85         # the cover's edge: a line nearly all other colours...
+TRIM_STEP = 0.03         # ...within this part of the picture after the margin
+TRIM_MAX = 0.03          # a thicker even band is part of the cover's design: kept
+TRIM_MAX_BLACK = 0.01    # black: only thin lines, unless black runs round all four sides
+
+
+def _margin_colour(strip):
+    """The margin's colour when `strip` is one even white or black, else None."""
+    stat = ImageStat.Stat(strip)
+    if max(stat.stddev) > 14:
+        return None
+    med = stat.median
+    if min(med) >= 200 and max(med) - min(med) <= 40 or max(med) <= 55:
+        return tuple(int(v) for v in med)
+    return None
+
+
+def _margin_lines(share, n: int) -> int:
+    """How many lines from the start are margin; `share` is each line's part of other colours."""
+    start = next((i for i, v in enumerate(share) if v > TRIM_SPECKS), len(share))
+    if start == 0 or start > n * TRIM_MAX:
+        return 0
+    if max(share[start:start + max(3, round(n * TRIM_STEP))], default=0.0) < TRIM_EDGE:
+        return 0                                     # no sharp edge after it: part of the cover's design
+    return start
+
+
+def scan_margins(img) -> tuple:
+    """(left, top, right, bottom): the pixels of a scanner's white or black margin on each side of a cover."""
+    if img.mode in ("RGBA", "LA", "PA") and img.getchannel("A").getextrema()[0] < 255:
+        img = Image.alpha_composite(Image.new("RGBA", img.size, (0, 0, 0, 255)), img.convert("RGBA"))
+    rgb = img.convert("RGB")
+    step = max(1, max(rgb.size) // 1000)            # big scans are looked at smaller: a cut never goes too far
+    if step > 1:
+        rgb = rgb.reduce(step)
+    w, h = rgb.size
+    if w < 16 or h < 16:
+        return 0, 0, 0, 0
+    runs, black, lengths = [], [], []
+    for side in ("left", "top", "right", "bottom"):
+        across = side in ("left", "right")            # its lines are the picture's columns
+        n = w if across else h
+        lengths.append(n)
+        band = max(2, n // 200)
+        if across:
+            region = (0, h // 4, w, h - h // 4)
+            strip = (0, h // 4, band, h - h // 4) if side == "left" else (w - band, h // 4, w, h - h // 4)
+        else:
+            region = (w // 4, 0, w - w // 4, h)
+            strip = (w // 4, 0, w - w // 4, band) if side == "top" else (w // 4, h - band, w - w // 4, h)
+        colour = _margin_colour(rgb.crop(strip))
+        if colour is None:
+            runs.append(0)
+            black.append(False)
+            continue
+        part = rgb.crop(region)
+        r, g, b = ImageChops.difference(part, Image.new("RGB", part.size, colour)).split()
+        other = ImageChops.lighter(ImageChops.lighter(r, g), b).point([0] * (TRIM_TOL + 1) + [255] * (255 - TRIM_TOL))
+        line = other.resize((n, 1) if across else (1, n), Image.Resampling.BOX)
+        share = [v / 255 for v in line.tobytes()]
+        if side in ("right", "bottom"):
+            share.reverse()
+        runs.append(_margin_lines(share, n))
+        black.append(max(colour) <= 55)
+    frame = all(black) and all(runs)                # black all round: a cover scanned on a black lid
+    return tuple(0 if dark and run > n * TRIM_MAX_BLACK and not frame else run * step
+                 for run, dark, n in zip(runs, black, lengths))
+
+
+def trim_scan(img):
+    """The cover without a scanner's margins, and what was cut (left, top, right, bottom) or None."""
+    box = scan_margins(img)
+    if not any(box):
+        return img, None
+    left, top, right, bottom = box
+    return img.crop((left, top, img.width - right, img.height - bottom)), box
 
 
 # -------------------------------------------------------------------------------------------------------- geometry
@@ -615,6 +702,7 @@ def default_profile() -> dict:
         "faces": {face: default_face(face) for face in FACES},
         "front_fallbacks": True,
         "match_region": True,
+        "trim_scans": True,        # a scanner's white or black margin cut off covers, spines and Box - Full scans
         "spine_from_full": True,
         "spine_generate": "logo",
         "spine_font": "Arial Bold",
@@ -1117,6 +1205,7 @@ class Pictures:
         self.front, self.spine, self.full, self.logo, self.marquee = front, spine, full, logo, marquee
         self.ctx = ctx or {}
         self.generic = False            # the front is a generic cover made by this program
+        self.trimmed: dict = {}         # pictures whose scanner margins were cut: key -> (left, top, right, bottom)
 
     def spine_for(self, profile):
         """Spine art and where it came from: its own picture, cut from Box - Full, made up, or none."""
@@ -2058,8 +2147,15 @@ def load_pictures(lb: LaunchBox, platform: str, game: Game, profile: dict, found
                 setattr(pics, key, load_picture(path, limit if key not in ("logo", "marquee") else 1600))
             except (OSError, ValueError, Image.DecompressionBombError) as exc:
                 log_line(f"cannot open {path}: {exc}")
-    if pics.front is not None:
-        pics.front = UPSCALER.apply(pics.front, found.get("front"), profile)     # small covers made sharper
+    if profile.get("trim_scans", True):
+        for key in ("front", "spine", "full"):
+            if getattr(pics, key) is not None:
+                pic, box = trim_scan(getattr(pics, key))
+                if box:
+                    setattr(pics, key, pic)
+                    pics.trimmed[key] = box
+    if pics.front is not None:                          # small covers made sharper
+        pics.front = UPSCALER.apply(pics.front, found.get("front"), profile, str(pics.trimmed.get("front") or ""))
     return pics, found
 
 
@@ -3454,14 +3550,17 @@ class Upscaler:
         self.server = server
         return server
 
-    def apply(self, img, src_path, profile: dict):
-        """The cover upscaled when it is smaller than the settings say (from the cache when it was done before)."""
+    def apply(self, img, src_path, profile: dict, variant: str = ""):
+        """The cover upscaled when it is smaller than the settings say (from the cache when it was done before);
+        `variant` tells a picture made from the file (its scan margins cut) from the file itself."""
         if img is None or not profile.get("upscale") or img.height >= int(profile.get("upscale_below", 800) or 0):
             return img
         try:
             digest = file_sha(src_path)[7:23] if src_path else hashlib.sha256(img.tobytes()).hexdigest()[:16]
         except OSError:
             return img
+        if variant:
+            digest = hashlib.sha256(f"{digest}|{variant}".encode()).hexdigest()[:16]
         wanted = profile.get("upscale_model", "")
         for done in sorted(CACHE_DIR.glob(f"up-{digest}-*.jpg")) if CACHE_DIR.is_dir() else []:
             if not wanted or done.stem.endswith(re.sub(r"[^A-Za-z0-9]+", "_", wanted)[:40]):
@@ -3577,6 +3676,18 @@ TEXTS = {
     "pics_section": "6. Picking pictures",
     "match_region": "Box - Spine only from the front's region folder",
     "front_fallbacks": "No Box - Front: use Box - Front - Reconstructed / Fanart - Box - Front",
+    "trim_scans": "Cut a scanner's thin white or black edge off the pictures (LaunchBox's files stay as they are)",
+    "info_trimmed": "scan edge cut",
+    "gal_open": "▦ Gallery of the games in the list…", "gal_title": "Gallery — {platform}",
+    "gal_box": "Box - 3D", "gal_disc": "Disc", "gal_small": "Small", "gal_medium": "Medium", "gal_large": "Large",
+    "gal_count": "{n} pictures · {missing} games in the list have none", "gal_marked": "{n} marked",
+    "gal_select": "Select the marked games in the list", "gal_clear": "Clear the marks", "gal_refresh": "↻ Refresh",
+    "gal_help": "Click: show the game in the main window · Right click: mark it as bad (again: unmark) · "
+                "Double click: open the picture",
+    "gal_selected": "{n} marked games are selected in the list: on the Save tab, choose “Replace” and make the "
+                    "selected games again.",
+    "gal_empty": "None of the games in the list has a {kind} picture yet.",
+    "gal_no_open": "Cannot open {path}: {error}",
     "override_section": "8. This game only", "override_load": "Own picture…",
     "override_clear": "Remove own pictures",
     "text_section": "1. Add text to: {face}",
@@ -3736,7 +3847,7 @@ def load_config() -> dict:
            "export": {"region": "same", "existing": "skip", "format": "png", "jpg_bg": "#ffffff", "max_height": 1000,
                       "trim": True, "threads": max(1, min(6, (os.cpu_count() or 4) - 1)), "make_box": True,
                       "make_disc": False},
-           "display": {"guides": True, "hq": True}, "ai": {}}
+           "display": {"guides": True, "hq": True}, "ai": {}, "gallery": {}}
     try:
         data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -3770,6 +3881,7 @@ class App:
         self.found: dict[int, dict] = {}
         self.rows: list[int] = []
         self.sort = ("title", False)
+        self.gallery: Gallery | None = None
         self.profile = merged_profile(self.cfg.get("default_profile"))
         self.template_img = None
         self.template_key = ""
@@ -4022,8 +4134,8 @@ class App:
         if scope in ("profile",) and key in ("front_fallbacks", "match_region"):
             self.refresh_statuses()
             self.load_current()
-        if scope == "profile" and key in ("upscale", "upscale_below", "upscale_model") and not slider:
-            self.load_current()                      # the cover shown, upscaled or not
+        if scope == "profile" and key in ("upscale", "upscale_below", "upscale_model", "trim_scans") and not slider:
+            self.load_current()                      # the cover shown, upscaled or cut or not
         if scope == "profile" and (key == "generic_cover" or key.startswith("gc_")):
             self.update_info()
         if scope == "export":
@@ -4171,6 +4283,7 @@ class App:
                              values=[self.t("filter_" + k) for k in self.filter_keys])
         combo.pack(side="left", fill="x", expand=True, padx=(8, 0))
         combo.bind("<<ComboboxSelected>>", lambda e: self.on_filter_mode())
+        self.button(body2, self.t("gal_open"), self.open_gallery).pack(fill="x", pady=(6, 0))
 
         frame = tk.Frame(parent, bg=PANEL)
         frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -4482,7 +4595,7 @@ class App:
         self.label(body, self.t("gc_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(4, 0))
 
         body = self.section(parent, self.t("pics_section"))
-        for key in ("front_fallbacks", "match_region"):
+        for key in ("front_fallbacks", "match_region", "trim_scans"):
             var = tk.BooleanVar()
             self.check(body, self.t(key), var).pack(fill="x")
             self.bind_var(var, "profile", key, bool)
@@ -4934,6 +5047,8 @@ class App:
         elif rows and self.current is None:
             self.tree.selection_set(str(rows[0]))
         self.update_go_buttons()
+        if self.gallery is not None:
+            self.gallery.schedule_rebuild()
 
     def fill_tree(self, rows):
         tree = self.tree
@@ -4970,6 +5085,31 @@ class App:
         self.pics = None
         self.update_info()
         self.load_current()
+
+    def show_game(self, i):
+        """Show game number i, as a click on its row would (also when the list shows only its first rows)."""
+        if not 0 <= i < len(self.games):
+            return
+        iid = str(i)
+        if self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.focus(iid)
+            self.tree.see(iid)
+            self.on_game_select()
+        elif i != self.current_index:
+            self.current_index, self.current = i, self.games[i]
+            self.overrides = {}
+            self.pics = None
+            self.update_info()
+            self.load_current()
+
+    def open_gallery(self):
+        if self.gallery is not None and not self.gallery.closed:
+            self.gallery.win.deiconify()
+            self.gallery.win.lift()
+            self.gallery.rebuild()
+            return
+        self.gallery = Gallery(self)
 
     def load_current(self):
         if not self.current or not self.lb:
@@ -5011,9 +5151,11 @@ class App:
         f = self.current_found or self.found.get(self.current_index, {})
         parts = [f"{g.title}" + (f"  [{g.region}]" if g.region else "")]
         generic = self.generic_wanted(f)
+        trimmed = self.pics.trimmed if self.pics is not None else {}
         if f.get("front"):
             where = f.get("region") or "—"
-            parts.append(f"{self.t('info_front')}: {f.get('front_type', FRONT_TYPES[0])} ({where})")
+            parts.append(f"{self.t('info_front')}: {f.get('front_type', FRONT_TYPES[0])} ({where})"
+                         + (f", {self.t('info_trimmed')}" if trimmed.get("front") else ""))
         elif generic:
             parts.append(f"{self.t('info_front')}: {self.t('src_generic_cover')}")
         else:
@@ -5030,6 +5172,8 @@ class App:
         spine_text = f"{self.t('info_spine')}: {names.get(origin, origin)}"
         if f.get("spine_other_region") and origin != "spine":
             spine_text += " " + self.t("src_other_region")
+        if origin in ("spine", "full") and trimmed.get(origin):
+            spine_text += f", {self.t('info_trimmed')}"
         parts.append(spine_text)
         n3d = len(f.get("box3d") or [])
         parts.append(f"{self.t('info_3d')}: " + (self.t("has3d", n=n3d) if n3d else self.t("no3d")))
@@ -6205,6 +6349,8 @@ class App:
                     self.update_row(index)
                     self.update_platform_info()
                     self.update_info()
+                    if self.gallery is not None:
+                        self.gallery.schedule_rebuild()
         elif kind == "webcover":
             _, index, game, path, where, found, error = msg
             if hasattr(self, "web_button"):
@@ -6273,6 +6419,457 @@ class App:
         except Exception as exc:  # noqa: BLE001
             log_line(f"screenshot: {exc}")
         self.root.after(200, lambda: os._exit(0))
+
+
+# ------------------------------------------------------------------------------------------------------ gallery
+GALLERY_CELL, GALLERY_MARK = "#16222f", "#ff5a5a"
+THUMBS_KEPT = 20000                 # thumbnails kept in the cache folder
+
+
+def gallery_thumb(path: str, width: int, height: int):
+    """A small copy of a picture that fits width x height, on the gallery's cell colour. It is kept in the cache
+    folder (by the file's name, time and size), so the gallery opens fast the next time."""
+    st = os.stat(path)
+    key = hashlib.sha1(f"{path}|{st.st_mtime_ns}|{st.st_size}|{width}x{height}".encode("utf-8", "replace")).hexdigest()
+    cached = CACHE_DIR / "thumbs" / f"{key}.jpg"
+    try:
+        with Image.open(cached) as im:
+            return im.convert("RGB")
+    except (OSError, ValueError):
+        pass
+    with Image.open(path) as im:
+        if im.format == "JPEG":
+            im.draft("RGB", (width * 2, height * 2))
+        img = im.convert("RGBA")
+    img.thumbnail((width, height), LANCZOS)
+    flat = Image.new("RGB", img.size, hex_rgb(GALLERY_CELL))
+    flat.paste(img, (0, 0), img.getchannel("A"))
+    try:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cached.with_name(f"{cached.stem}.{threading.get_ident()}.tmp")
+        flat.save(tmp, "JPEG", quality=88)
+        os.replace(tmp, cached)
+    except OSError as exc:
+        log_line(f"thumbnail cache: {exc}")
+    return flat
+
+
+def tidy_thumbs(keep: int = THUMBS_KEPT) -> None:
+    """The thumbnail cache cut back to its newest half when it holds more than `keep` pictures."""
+    try:
+        files = sorted((CACHE_DIR / "thumbs").glob("*.jpg"), key=lambda p: p.stat().st_mtime)
+        for p in files[:len(files) - keep // 2] if len(files) > keep else []:
+            p.unlink(missing_ok=True)
+    except OSError as exc:
+        log_line(f"thumbnail cache: {exc}")
+
+
+class Gallery:
+    """The Box - 3D (or Disc) pictures of the games in the main window's list, side by side, to find bad ones quickly.
+    Only the rows in view are drawn; their thumbnails are made in the background and kept in the cache folder."""
+
+    SIZES = {"small": 130, "medium": 190, "large": 270}
+    WORKERS = 3
+
+    def __init__(self, app):
+        self.app, self.t, self.px = app, app.t, app.px
+        s = app.cfg.setdefault("gallery", {})
+        self.kind_var = tk.StringVar(value=s.get("kind") if s.get("kind") in ("box3d", "disc") else "box3d")
+        self.size_var = tk.StringVar(value=s.get("size") if s.get("size") in self.SIZES else "medium")
+        self.items: list = []           # (game number, picture path, how many such pictures the game has)
+        self.missing = 0
+        self.marked: set = set()        # game numbers marked as bad
+        self.platform = app.platform
+        self.drawn: dict = {}           # item number -> (cell, picture or None, caption, thumbnail key)
+        self.photos: dict = {}          # thumbnail key -> PhotoImage, for the rows near the view
+        self.failed: set = set()
+        self.wanted: list = []          # thumbnails to make, the first one in view last
+        self.working: set = set()
+        self.cond = threading.Condition()
+        self.done: queue.Queue = queue.Queue()
+        self.closed = False
+        self.cols, self.left, self.cell, self.thumb = 1, 0, (1, 1), (1, 1)
+        self._pump_job = self._rebuild_job = self._refresh_job = None
+        self.win = tk.Toplevel(app.root)
+        self.font = tkfont.Font(root=self.win, font=ui_font(8))
+        self.build()
+        for _ in range(self.WORKERS):
+            threading.Thread(target=self.work, daemon=True).start()
+        threading.Thread(target=tidy_thumbs, daemon=True).start()
+        # timers go on the main window, which outlives this one; close() cancels them
+        self._pump_job = app.root.after(50, self.pump)
+        self.win.update_idletasks()
+        self.rebuild(keep_place=False)
+
+    # ------------------------------------------------------------------------------------------- building
+    def build(self):
+        app, win, t, px = self.app, self.win, self.t, self.px
+        win.title(t("gal_title", platform=app.platform or "—"))
+        win.configure(bg=BG)
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.geometry(f"{min(sw - 80, px(1180))}x{min(sh - 120, px(860))}")
+        win.minsize(min(sw - 80, px(560)), min(sh - 120, px(420)))
+        if getattr(app.root, "_icon", None) is not None:
+            win.iconphoto(False, app.root._icon)
+        win.protocol("WM_DELETE_WINDOW", self.close)
+        win.bind("<Escape>", lambda e: self.close())
+
+        bar = tk.Frame(win, bg=PANEL)
+        bar.pack(fill="x", padx=8, pady=(8, 0))
+        for var, choices, command in ((self.kind_var, (("box3d", "gal_box"), ("disc", "gal_disc")), self.on_kind),
+                                      (self.size_var, (("small", "gal_small"), ("medium", "gal_medium"),
+                                                       ("large", "gal_large")), self.on_size)):
+            group = tk.Frame(bar, bg=PANEL)
+            group.pack(side="left", padx=(8, 4), pady=6)
+            for value, key in choices:
+                tk.Radiobutton(group, text=t(key), variable=var, value=value, command=command, indicatoron=0,
+                               bg="#1b3550", fg=FG, selectcolor=BLUE, activebackground="#24476b",
+                               activeforeground="white", relief="flat", bd=0, padx=10, pady=4,
+                               font=ui_font(9, True)).pack(side="left", padx=(0, 2))
+        app.button(bar, t("gal_refresh"), lambda: self.rebuild()).pack(side="right", padx=(4, 8), pady=6)
+        self.clear_button = app.button(bar, t("gal_clear"), self.clear_marks)
+        self.clear_button.pack(side="right", padx=4, pady=6)
+        self.select_button = app.button(bar, t("gal_select"), self.select_marked, "blue")
+        self.select_button.pack(side="right", padx=4, pady=6)
+        self.count_label = app.label(bar, "", SOFT, 9)
+        self.count_label.pack(side="left", fill="x", expand=True, padx=(8, 4))
+
+        self.status = tk.Label(win, text=t("gal_help"), bg=BG, fg=MUTED, font=ui_font(8), anchor="w", justify="left")
+        self.status.pack(side="bottom", fill="x", padx=12, pady=(0, 8))
+        body = tk.Frame(win, bg=CANVAS_BG)
+        body.pack(fill="both", expand=True, padx=8, pady=8)
+        self.canvas = c = tk.Canvas(body, bg=CANVAS_BG, highlightthickness=0, bd=0, takefocus=1)
+        scroll = ttk.Scrollbar(body, orient="vertical", command=self.yview)
+        c.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        c.pack(side="left", fill="both", expand=True)
+        c.bind("<Configure>", lambda e: self.schedule_rebuild(60))
+        c.bind("<MouseWheel>", self.on_wheel)
+        c.bind("<Button-1>", self.on_click)
+        c.bind("<Double-Button-1>", self.on_open)
+        c.bind("<Button-3>", self.on_mark)
+        c.bind("<Motion>", self.on_motion)
+        for key, args in (("<Prior>", (-1, "pages")), ("<Next>", (1, "pages")), ("<Up>", (-1, "units")),
+                          ("<Down>", (1, "units"))):
+            c.bind(key, lambda e, a=args: self.yview("scroll", *a))
+        c.bind("<Home>", lambda e: self.yview("moveto", 0))
+        c.bind("<End>", lambda e: self.yview("moveto", 1))
+
+    # ------------------------------------------------------------------------------------------- the grid
+    def rebuild(self, keep_place=True):
+        """The items again from the main list (its filter, search and order), then the rows in view."""
+        self._rebuild_job = None
+        if self.closed:
+            return
+        app = self.app
+        if app.platform != self.platform:            # another platform: other games, marks start again
+            self.platform, keep_place = app.platform, False
+            self.marked.clear()
+        self.win.title(self.t("gal_title", platform=app.platform or "—"))
+        key = self.kind_var.get()
+        items, missing = [], 0
+        for i in app.rows:
+            pictures = app.found.get(i, {}).get(key) or []
+            if pictures:
+                items.append((i, pictures[0], len(pictures)))
+            else:
+                missing += 1
+        top = self.canvas.yview()[0] if keep_place else 0.0
+        self.items, self.missing = items, missing
+        self.clear()
+        self.layout()
+        self.canvas.yview_moveto(top)
+        self.refresh()
+        self.update_labels()
+
+    def layout(self):
+        th = self.px(self.SIZES[self.size_var.get()])
+        tw = th if self.kind_var.get() == "disc" else round(th * 0.78)
+        pad, cap = self.px(6), self.px(20)
+        self.thumb = (tw, th)
+        self.cell = (tw + 2 * pad, th + cap + 2 * pad)
+        width = max(self.cell[0], self.canvas.winfo_width())
+        self.cols = max(1, width // self.cell[0])
+        self.left = (width - self.cols * self.cell[0]) // 2
+        rows = -(-len(self.items) // self.cols)
+        self.canvas.configure(scrollregion=(0, 0, width, max(1, rows * self.cell[1])),
+                              yscrollincrement=max(1, self.cell[1] // 3))
+
+    def clear(self):
+        self.canvas.delete("all")
+        self.drawn.clear()
+
+    def schedule_rebuild(self, delay=300):
+        if self.closed:
+            return
+        if self._rebuild_job is not None:
+            self.app.root.after_cancel(self._rebuild_job)
+        self._rebuild_job = self.app.root.after(delay, self.rebuild)
+
+    def schedule_refresh(self):
+        if self._refresh_job is None and not self.closed:
+            self._refresh_job = self.app.root.after(15, self.refresh)
+
+    def yview(self, *args):
+        self.canvas.yview(*args)
+        self.schedule_refresh()
+
+    def on_wheel(self, event):
+        self.canvas.yview_scroll(int(-event.delta / 120) * 3, "units")
+        self.schedule_refresh()
+
+    def refresh(self):
+        """Draw the rows in view (and one more on each side), drop the others, ask for missing thumbnails."""
+        self._refresh_job = None
+        if self.closed:
+            return
+        c = self.canvas
+        c.delete("empty")
+        if not self.items:
+            kind = self.t("gal_box" if self.kind_var.get() == "box3d" else "gal_disc")
+            c.create_text(max(40, c.winfo_width()) // 2, self.px(60), text=self.t("gal_empty", kind=kind), fill=MUTED,
+                          font=ui_font(11), tags="empty")
+            return
+        top = c.canvasy(0)
+        height = self.cell[1]
+        first = max(0, int(top // height) - 1) * self.cols
+        last = min(len(self.items), (int((top + c.winfo_height()) // height) + 2) * self.cols)
+        for k in [k for k in self.drawn if not first <= k < last]:
+            for item in self.drawn.pop(k)[:3]:
+                if item is not None:
+                    c.delete(item)
+        want = []
+        for k in range(first, last):
+            if k not in self.drawn:
+                self.draw_item(k)
+            key = self.drawn[k][3]
+            if key not in self.photos and key not in self.failed:
+                want.append(key)
+        with self.cond:
+            self.wanted = [key for key in reversed(want) if key not in self.working]
+            self.cond.notify_all()
+        self.forget_photos()
+
+    def thumb_key(self, path):
+        try:
+            stamp = os.stat(path).st_mtime_ns            # a picture made again shows again
+        except OSError:
+            stamp = 0
+        return path, stamp, self.thumb[0], self.thumb[1]
+
+    def origin(self, k):
+        row, col = divmod(k, self.cols)
+        return self.left + col * self.cell[0], row * self.cell[1]
+
+    def outline(self, i):
+        if i in self.marked:
+            return GALLERY_MARK, self.px(3)
+        if i == self.app.current_index:
+            return BLUE, self.px(3)
+        return GALLERY_CELL, 1
+
+    def draw_item(self, k):
+        c = self.canvas
+        i, path, n = self.items[k]
+        x, y = self.origin(k)
+        (cw, ch), (tw, th), pad = self.cell, self.thumb, self.px(6)
+        color, width = self.outline(i)
+        cell = c.create_rectangle(x + 2, y + 2, x + cw - 2, y + ch - 2, fill=GALLERY_CELL, outline=color, width=width)
+        key = self.thumb_key(path)
+        picture = None
+        if key in self.photos:
+            picture = c.create_image(x + cw // 2, y + pad + th // 2, image=self.photos[key])
+        elif key in self.failed:
+            picture = c.create_text(x + cw // 2, y + pad + th // 2, text="?", fill=MUTED, font=ui_font(16, True))
+        title = self.app.games[i].title if i < len(self.app.games) else "?"
+        if n > 1:
+            title += f"  ×{n}"
+        caption = c.create_text(x + cw // 2, y + ch - pad - self.px(8), text=self.fit(title, cw - 2 * pad), fill=SOFT,
+                                font=ui_font(8))
+        self.drawn[k] = (cell, picture, caption, key)
+
+    def fit(self, text, width):
+        if self.font.measure(text) <= width:
+            return text
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.font.measure(text[:mid] + "…") <= width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return text[:lo] + "…"
+
+    def place_pictures(self):
+        c = self.canvas
+        (cw, _ch), (_tw, th), pad = self.cell, self.thumb, self.px(6)
+        for k, (cell, picture, caption, key) in list(self.drawn.items()):
+            if picture is not None:
+                continue
+            x, y = self.origin(k)
+            if key in self.photos:
+                picture = c.create_image(x + cw // 2, y + pad + th // 2, image=self.photos[key])
+            elif key in self.failed:
+                picture = c.create_text(x + cw // 2, y + pad + th // 2, text="?", fill=MUTED, font=ui_font(16, True))
+            else:
+                continue
+            self.drawn[k] = (cell, picture, caption, key)
+
+    def forget_photos(self):
+        """Thumbnails far from the view are let go (the cache folder keeps them)."""
+        if len(self.photos) <= len(self.drawn) + 300:
+            return
+        used = {entry[3] for entry in self.drawn.values()}
+        for key in [key for key in self.photos if key not in used][:len(self.photos) - len(self.drawn) - 150]:
+            del self.photos[key]
+
+    def redraw_outlines(self):
+        for k, (cell, _picture, _caption, _key) in self.drawn.items():
+            color, width = self.outline(self.items[k][0])
+            self.canvas.itemconfigure(cell, outline=color, width=width)
+
+    def update_labels(self):
+        text = self.t("gal_count", n=len(self.items), missing=self.missing)
+        if self.marked:
+            text += "   ·   " + self.t("gal_marked", n=len(self.marked))
+        self.count_label.configure(text=text)
+        state = "normal" if self.marked else "disabled"
+        self.select_button.configure(state=state)
+        self.clear_button.configure(state=state)
+
+    # ------------------------------------------------------------------------------------------- thumbnails
+    def work(self):
+        while True:
+            with self.cond:
+                while not self.closed and not self.wanted:
+                    self.cond.wait(0.5)
+                if self.closed:
+                    return
+                key = self.wanted.pop()
+                self.working.add(key)
+            try:
+                thumb = gallery_thumb(key[0], key[2], key[3])
+            except Exception as exc:  # noqa: BLE001 - a picture that cannot be read shows as "?"
+                log_line(f"gallery: {key[0]}: {exc}")
+                thumb = None
+            with self.cond:
+                self.working.discard(key)
+            self.done.put((key, thumb))
+
+    def pump(self):
+        self._pump_job = None
+        if self.closed:
+            return
+        got = False
+        try:
+            for _ in range(80):
+                key, thumb = self.done.get_nowait()
+                if thumb is None:
+                    self.failed.add(key)
+                else:
+                    self.photos[key] = ImageTk.PhotoImage(thumb, master=self.win)
+                got = True
+        except queue.Empty:
+            pass
+        if got:
+            self.place_pictures()
+        self._pump_job = self.app.root.after(50, self.pump)
+
+    # ------------------------------------------------------------------------------------------- mouse
+    def item_at(self, event):
+        x, y = self.canvas.canvasx(event.x) - self.left, self.canvas.canvasy(event.y)
+        if x < 0 or y < 0:
+            return None
+        col, row = int(x // self.cell[0]), int(y // self.cell[1])
+        k = row * self.cols + col
+        return k if col < self.cols and k < len(self.items) else None
+
+    def describe(self, k):
+        i, path, n = self.items[k]
+        if i >= len(self.app.games):                  # another platform is loading
+            return path
+        game = self.app.games[i]
+        return f"{game.title}" + (f"  [{game.region}]" if game.region else "") + f"   ·   {path}" + (
+            f"   ·   ×{n}" if n > 1 else "")
+
+    def on_click(self, event):
+        self.canvas.focus_set()
+        k = self.item_at(event)
+        if k is None:
+            return
+        self.app.show_game(self.items[k][0])
+        self.redraw_outlines()
+        self.status.configure(text=self.describe(k))
+
+    def on_open(self, event):
+        k = self.item_at(event)
+        if k is None:
+            return
+        path = self.items[k][1]
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(path)                       # noqa: S606 - the user's own picture, in their viewer
+        except OSError as exc:
+            self.status.configure(text=self.t("gal_no_open", path=path, error=exc))
+
+    def on_mark(self, event):
+        k = self.item_at(event)
+        if k is None:
+            return
+        i = self.items[k][0]
+        self.marked.symmetric_difference_update({i})
+        self.redraw_outlines()
+        self.update_labels()
+
+    def on_motion(self, event):
+        k = self.item_at(event)
+        self.status.configure(text=self.describe(k) if k is not None else self.t("gal_help"))
+
+    def on_kind(self):
+        self.app.cfg["gallery"]["kind"] = self.kind_var.get()
+        self.app.schedule_save()
+        self.rebuild(keep_place=False)
+
+    def on_size(self):
+        self.app.cfg["gallery"]["size"] = self.size_var.get()
+        self.app.schedule_save()
+        self.rebuild()
+
+    def select_marked(self):
+        app = self.app
+        ids = [str(i) for i in sorted(self.marked) if app.tree.exists(str(i))]
+        app.tree.selection_set(ids)
+        if ids:
+            app.tree.see(ids[0])
+        app.update_go_buttons()
+        text = self.t("gal_selected", n=len(ids))
+        app.set_status(text)
+        self.status.configure(text=text)
+
+    def clear_marks(self):
+        self.marked.clear()
+        self.redraw_outlines()
+        self.update_labels()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        with self.cond:
+            self.wanted.clear()
+            self.cond.notify_all()
+        for job in (self._pump_job, self._rebuild_job, self._refresh_job):
+            if job is not None:
+                try:
+                    self.app.root.after_cancel(job)
+                except tk.TclError:
+                    pass
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
+        if self.app.gallery is self:
+            self.app.gallery = None
 
 
 WARN, GOOD = "#ffb4a8", "#7fe0a8"
@@ -7242,6 +7839,12 @@ def selftest(report: str) -> int:
         check("generic disc", render_disc(default_profile(), bare, "", 300).size == (300, 300))
         umd = render_disc(default_profile(), Pictures(front=front.convert("RGBA"), ctx={"title": "Combat"}),
                           "Sony PSP", 400)
+        scan = Image.new("RGB", (408, 560), (255, 255, 255))
+        scan.paste(front.convert("RGB").resize((400, 560)), (8, 0))
+        band = Image.new("RGB", (400, 600), (0, 0, 0))
+        band.paste(front.convert("RGB").resize((400, 560)), (0, 40))
+        check("scan edges", scan_margins(scan) == (8, 0, 0, 0) and scan_margins(band) == (0, 0, 0, 0),
+              f"{scan_margins(scan)} {scan_margins(band)}")
         check("UMD", umd.size == (400, round(400 * UMD_HEIGHT)) and umd.getpixel((200, 200))[3] == 255
               and umd.getpixel((0, 0))[3] == 0 and umd.getpixel((4, umd.height - 4))[3] == 0,
               f"kind {disc_kind(default_profile(), 'Sony PSP')}")
