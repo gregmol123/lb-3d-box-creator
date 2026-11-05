@@ -41,7 +41,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk, PngImagePlugin
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -772,6 +772,7 @@ def default_profile() -> dict:
         "back_details": True,      # ...publisher, developer, year, genre, players, rating
         "back_platform": True,     # ...the platform's logo
         "back_height": 1400,
+        "logo_away": True,         # a logo cut from the cover loses its even ground
     }
 
 
@@ -1779,31 +1780,45 @@ def cart_depth(profile: dict, platform: str = "") -> float:
     return next((d for phrase, d in CART_DEPTHS if f" {phrase} " in name), CART_DEPTH)
 
 
-def _background_away(img):
-    """The mask of a photo without its even background (the colour round its edge, flood-filled from the edge), or
-    None when the background is not even or cannot be told from the cartridge (a grey cartridge on grey)."""
-    rgb = img.convert("RGB")
+def _even_ground(rgb):
+    """The colour round a picture's edge when it is even (most of the edge near the middle colour), else None."""
     w, h = rgb.size
-    if w < 16 or h < 16:
-        return None
     edge = [rgb.getpixel((x, y)) for x in range(0, w, max(1, w // 40)) for y in (0, h - 1)] + \
            [rgb.getpixel((x, y)) for y in range(0, h, max(1, h // 40)) for x in (0, w - 1)]
     bg = tuple(sorted(c[i] for c in edge)[len(edge) // 2] for i in range(3))
     if sum(1 for c in edge if max(abs(c[i] - bg[i]) for i in range(3)) <= 24) < 0.6 * len(edge):
         return None
+    return bg
+
+
+def _without_ground(rgb, bg, tol: int):
+    """The mask (L) of a picture without its ground: the pixels near `bg` that touch the edge, flood-filled from it
+    (on a small copy), taken away; whatever is inside the outline stays."""
+    w, h = rgb.size
     r, g, b = ImageChops.difference(rgb, Image.new("RGB", rgb.size, bg)).split()
-    diff = ImageChops.lighter(ImageChops.lighter(r, g), b)
+    near = ImageChops.lighter(ImageChops.lighter(r, g), b).point([255] * (tol + 1) + [0] * (255 - tol))
     step = max(1, max(w, h) // 300)
+    small = near.reduce(step).point([0] * 128 + [255] * 128)
+    sw, sh = small.size
+    for x, y in [(x, y) for x in range(sw) for y in (0, sh - 1)] + [(x, y) for y in range(sh) for x in (0, sw - 1)]:
+        if small.getpixel((x, y)) == 255:
+            ImageDraw.floodfill(small, (x, y), 128)
+    outside = small.point([0] * 128 + [255] + [0] * 127).resize((w, h), BILINEAR)
+    outside = outside.filter(ImageFilter.MaxFilter(3)).point([0] * 65 + [255] * 191)
+    return ImageChops.invert(ImageChops.multiply(outside, near))
+
+
+def _background_away(img):
+    """The mask of a photo without its even background (the colour round its edge, flood-filled from the edge), or
+    None when the background is not even or cannot be told from the cartridge (a grey cartridge on grey)."""
+    rgb = img.convert("RGB")
+    if min(rgb.size) < 16:
+        return None
+    bg = _even_ground(rgb)
+    if bg is None:
+        return None
     for tol in CART_TOLS:
-        near = diff.point([255] * (tol + 1) + [0] * (255 - tol))
-        small = near.reduce(step).point([0] * 128 + [255] * 128)
-        sw, sh = small.size
-        for x, y in [(x, y) for x in range(sw) for y in (0, sh - 1)] + [(x, y) for y in range(sh) for x in (0, sw - 1)]:
-            if small.getpixel((x, y)) == 255:
-                ImageDraw.floodfill(small, (x, y), 128)
-        outside = small.point([0] * 128 + [255] + [0] * 127).resize((w, h), BILINEAR)
-        outside = outside.filter(ImageFilter.MaxFilter(3)).point([0] * 65 + [255] * 191)
-        mask = ImageChops.invert(ImageChops.multiply(outside, near))
+        mask = _without_ground(rgb, bg, tol)
         # specks of background gone, the outline smoothed: no ragged wall swept from them
         mask = mask.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MedianFilter(7))
         box = mask.getbbox()
@@ -1811,6 +1826,45 @@ def _background_away(img):
                 ImageStat.Stat(mask).mean[0] / 255 >= CART_KEEP:
             return mask.filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(0.7))   # soft, no halo
     return None
+
+
+# A game without a Clear Logo can get one cut from its cover: a frame drawn round the logo on the Box - Front, its
+# even ground (the colour round the frame's edge) taken away when the letters can be told from it, saved as the
+# game's Clear Logo in LaunchBox (so spines, discs and back covers - and LaunchBox itself - use it).
+def cut_logo(cover, box, away: bool = True):
+    """The logo inside `box` (left, top, right, bottom in the cover's pixels) on the cover, as RGBA cropped to it;
+    its even ground taken away when asked and when that leaves letters (a busy ground stays: a rectangle)."""
+    x0, y0, x1, y1 = (int(round(v)) for v in box)
+    x0, x1 = sorted((max(0, min(cover.width, x0)), max(0, min(cover.width, x1))))
+    y0, y1 = sorted((max(0, min(cover.height, y0)), max(0, min(cover.height, y1))))
+    if x1 - x0 < 4 or y1 - y0 < 4:
+        return None
+    part = cover.convert("RGBA").crop((x0, y0, x1, y1))
+    if away and min(part.size) >= 16:
+        rgb = part.convert("RGB")
+        bg = _even_ground(rgb)
+        if bg is not None:
+            mask = _without_ground(rgb, bg, 40).filter(ImageFilter.MinFilter(3)).filter(ImageFilter.MaxFilter(3))
+            kept = ImageStat.Stat(mask).mean[0] / 255
+            if 0.03 <= kept <= 0.92:                     # something was taken away, and letters are left
+                part.putalpha(ImageChops.multiply(part.getchannel("A"), mask.filter(ImageFilter.GaussianBlur(0.6))))
+                inner = part.getchannel("A").point([0] * 9 + [255] * 247).getbbox()
+                if inner:
+                    part = part.crop(inner)
+    return part
+
+
+def save_clear_logo(lb: LaunchBox, platform: str, game: Game, logo) -> Path:
+    """`logo` saved as the game's Clear Logo in LaunchBox: main folder, <title>-NN.png, never over a file."""
+    folder = lb.media_folder(platform, LOGO_TYPE)
+    base = clean_name(game.title)
+    n = 1
+    while any((folder / f"{base}-{n:02d}{ext}").exists() for ext in (".png", ".jpg")):
+        n += 1
+    path = folder / f"{base}-{n:02d}.png"
+    save_picture(logo, path, None, None, lb.root, "png")
+    lb.index(platform, LOGO_TYPE).add("", str(path))
+    return path
 
 
 def _cart_cut(img, mode: str = "auto"):
@@ -4360,6 +4414,18 @@ TEXTS = {
                  "program made can be made again with Replace.",
     "back_show": "👁 Show the back in the preview",
     "help_back": "The Back tab sets the back cover · wheel: zoom · right button: pan · double click: fit",
+    "help_logo": "Drag a frame round the game's logo on its cover, then save it on the Text / Logo tab · wheel: zoom · "
+                 "right button: pan",
+    "logo_section": "Logo from the cover (games without a Clear Logo)",
+    "logo_has": "This game has a Clear Logo.", "logo_none": "This game has no Clear Logo: pick it on its cover.",
+    "logo_no_front": "This game has no Box - Front to pick a logo on.",
+    "logo_pick": "▭ Pick the logo on the cover", "logo_save": "💾 Save as this game's Clear Logo",
+    "logo_away": "Take away the even ground round the letters",
+    "logo_note": "Shows the Box - Front flat: drag a frame round its logo. The logo is saved into LaunchBox as the "
+                 "game's Clear Logo (a new file, never over one), so its spine, disc and back cover — and LaunchBox — "
+                 "use it.",
+    "logo_frame_first": "Drag a frame round the logo on the cover first (▭ Pick the logo on the cover).",
+    "logo_saved": "Clear Logo saved: {path}",
     "info_back": "Box - Back", "back_own": "yes (a scan or other picture)", "back_made": "made by this program",
     "filter_noback": "Without Box - Back", "filter_hasback": "With Box - Back", "gal_back": "Box - Back",
     "disc_show": "👁 Show the disc in the preview",
@@ -4514,6 +4580,7 @@ class App:
         self.rows: list[int] = []
         self.sort = ("title", False)
         self.cart_platform = False
+        self.logo_sel = self.logo_drag = self.logo_cut = self.logo_photo = None   # the Logo view's frame and its cut
         self.gallery: Gallery | None = None
         self.profile = merged_profile(self.cfg.get("default_profile"))
         self.template_img = None
@@ -5373,6 +5440,21 @@ class App:
         self.check(body, self.t("only_made"), var).pack(fill="x", pady=(6, 0))
         self.bind_var(var, "layer", "only_made", bool)
 
+        body = self.section(parent, self.t("logo_section"))
+        self.logo_state = self.label(body, "", SOFT, 8, wraplength=self.px(370))
+        self.logo_state.pack(fill="x")
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(4, 0))
+        self.button(row, self.t("logo_pick"), lambda: self.set_view("logo")).pack(side="left")
+        self.logo_save_button = self.button(row, self.t("logo_save"), self.save_logo, "green")
+        self.logo_save_button.pack(side="left", padx=(6, 0))
+        var = tk.BooleanVar()
+        self.check(body, self.t("logo_away"), var).pack(fill="x", pady=(6, 0))
+        self.bind_var(var, "profile", "logo_away", bool, after=self.update_logo_cut)
+        self.logo_view = tk.Label(body, bg=PANEL2, bd=0)
+        self.logo_view.pack(anchor="w", pady=(6, 0))
+        self.label(body, self.t("logo_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(6, 0))
+
     def build_disc_tab(self, parent):
         body = self.section(parent, self.t("disc_kind_section"))
         var = tk.StringVar()
@@ -5814,6 +5896,8 @@ class App:
         self.current = self.games[i]
         self.overrides = {}
         self.pics = None
+        self.logo_sel = None
+        self.update_logo_cut()
         self.update_info()
         self.load_current()
 
@@ -5831,6 +5915,8 @@ class App:
             self.current_index, self.current = i, self.games[i]
             self.overrides = {}
             self.pics = None
+            self.logo_sel = None
+            self.update_logo_cut()
             self.update_info()
             self.load_current()
 
@@ -5926,6 +6012,7 @@ class App:
             state = self.t("no3d") if not backs else self.t("back_made") if made_here(backs[0]) else self.t("back_own")
             parts.append(f"{self.t('info_back')}: {state}")
         self.info_label.configure(text="   ·   ".join(parts))
+        self.update_logo_panel()
 
     # ------------------------------------------------------------------------------------------- templates
     def template_names(self):
@@ -6543,8 +6630,8 @@ class App:
         for key, b in self.view_buttons.items():
             b.configure(bg=BLUE if key == view else "#1b3550", fg="white" if key == view else FG)
         if hasattr(self, "help_label"):
-            self.help_label.configure(text=self.t({"disc": "help_disc", "cart": "help_cart", "back": "help_back"}
-                                                  .get(view, "help")))
+            self.help_label.configure(text=self.t({"disc": "help_disc", "cart": "help_cart", "back": "help_back",
+                                                   "logo": "help_logo"}.get(view, "help")))
         self.zoom, self.pan = 1.0, [0.0, 0.0]
         self.update_info()
         self.request_draw()
@@ -6614,6 +6701,9 @@ class App:
             elif self.view == "back":
                 img = render_back(self.profile, pics, 500 if fast else max(300, min(1400, round(ch - m))))
                 used, scale = {}, 1.0
+            elif self.view == "logo":                    # the Box - Front flat, to frame its logo on
+                img = pics.front.convert("RGBA") if pics.front is not None else None
+                used, scale = {}, 1.0
             else:
                 img, used = render_box(self.profile, self.template_img, self.quads, pics, height=height,
                                        scale=max(0.05, scale), ss=1 if fast or not hq else 2, fast=fast)
@@ -6626,7 +6716,7 @@ class App:
             c.create_text(cw // 2, ch // 2, text=self.t("no_cart_front" if self.view == "cart" else "no_front_pic"),
                           fill=MUTED, font=ui_font(12), width=cw - 40)
             return
-        if self.view in ("disc", "cart", "back"):
+        if self.view in ("disc", "cart", "back", "logo"):
             disp = min((cw - m) / img.width, (ch - m) / img.height) * self.zoom
         elif self.view in ("front", "spine"):
             quad = used.get(self.view)
@@ -6653,6 +6743,10 @@ class App:
             c.create_image(x0 + vx0, y0 + vy0, anchor="nw", image=self.photo)
         self.view_origin = (x0, y0)
         self.view_fit = scale * disp
+        if self.view == "logo" and self.logo_sel:
+            sx0, sy0, sx1, sy1 = self.logo_sel
+            c.create_rectangle(x0 + sx0 * disp, y0 + sy0 * disp, x0 + sx1 * disp, y0 + sy1 * disp, outline="#00e0ff",
+                               width=self.px(2), dash=(6, 3))
         if self.view == "3d":
             self.shown_quads = {f: [(x0 + x * disp, y0 + y * disp) for x, y in q] for f, q in used.items() if q}
             if self.cfg["display"].get("guides", True):
@@ -6673,8 +6767,23 @@ class App:
             self.root.after(500, self.take_screenshot)
 
     # ------------------------------------------------------------------------------------------- mouse / keys
+    def cover_point(self, e):
+        """Where a mouse event is on the cover shown in the Logo view, in the cover's pixels (None: no cover)."""
+        front = self.render_pics().front if self.current is not None else None
+        if front is None:
+            return None
+        x0, y0 = self.view_origin
+        f = max(1e-6, self.view_fit)
+        return min(max((e.x - x0) / f, 0.0), front.width), min(max((e.y - y0) / f, 0.0), front.height)
+
     def on_press(self, e):
         self.canvas.focus_set()
+        if self.view == "logo":                          # a frame round the logo starts here
+            point = self.cover_point(e)
+            if point is not None:
+                self.logo_drag = point
+                self.logo_sel = point + point
+            return
         if self.view != "3d" or not self.shown_quads:
             return
         if self.template_img is not None and self.cfg["display"].get("guides", True):
@@ -6693,6 +6802,13 @@ class App:
                 return
 
     def on_motion(self, e):
+        if self.view == "logo":
+            point = self.cover_point(e) if self.logo_drag else None
+            if point is not None:
+                (ax, ay), (bx, by) = self.logo_drag, point
+                self.logo_sel = (min(ax, bx), min(ay, by), max(ax, bx), max(ay, by))
+                self.request_draw(fast=True)
+            return
         if not self.drag or self.template_img is None:
             return
         face, i = self.drag
@@ -6708,10 +6824,71 @@ class App:
             self.request_draw(fast=True)
 
     def on_release(self, _e):
+        if self.view == "logo" and self.logo_drag:
+            self.logo_drag = None
+            self.update_logo_cut()
+            self.request_draw()
+            return
         if self.drag:
             self.drag = None
             self.store_quads()
             self.request_draw()
+
+    # ------------------------------------------------------------------------------------------- logo from the cover
+    def update_logo_panel(self):
+        """The Text / Logo tab's line about the game's Clear Logo."""
+        if not hasattr(self, "logo_state"):
+            return
+        f = self.current_found or {}
+        if self.current is None:
+            text = ""
+        elif f.get("logo"):
+            text = self.t("logo_has")
+        elif self.pics is not None and self.pics.front is None and "front" not in self.overrides:
+            text = self.t("logo_no_front")
+        else:
+            text = self.t("logo_none")
+        self.logo_state.configure(text=text)
+
+    def update_logo_cut(self):
+        """The logo inside the frame, cut from the cover, and its small picture on the Text / Logo tab."""
+        front = self.render_pics().front if self.current is not None else None
+        self.logo_cut = (cut_logo(front, self.logo_sel, bool(self.profile.get("logo_away", True)))
+                         if front is not None and self.logo_sel else None)
+        if not hasattr(self, "logo_view"):
+            return
+        if self.logo_cut is None:
+            self.logo_view.configure(image="")
+            self.logo_photo = None
+            return
+        thumb = self.logo_cut.copy()
+        thumb.thumbnail((self.px(300), self.px(110)), LANCZOS)
+        ground = Image.new("RGBA", thumb.size, (70, 80, 92, 255))
+        ground.alpha_composite(thumb)
+        self.logo_photo = ImageTk.PhotoImage(ground, master=self.root)
+        self.logo_view.configure(image=self.logo_photo)
+
+    def save_logo(self):
+        """The logo cut from the cover saved as the game's Clear Logo in LaunchBox."""
+        if self.current is None or self.lb is None:
+            return
+        if self.logo_cut is None:
+            self.inform(self.t("logo_frame_first"))
+            return
+        try:
+            path = save_clear_logo(self.lb, self.platform, self.current, self.logo_cut)
+        except OSError as exc:
+            self.inform(f"{self.t('error')}: {exc}")
+            return
+        text = self.t("logo_saved", path=path)
+        self.set_status(text)
+        self.log(text)
+        for f in (self.found.setdefault(self.current_index, {}), self.current_found):
+            f.setdefault("logo", str(path))
+        self.logo_sel = None
+        self.update_logo_cut()
+        self.load_current()                              # its spine, disc and back use it from now on
+        self.update_logo_panel()
 
     def on_key(self, e):
         if not self.handle or self.template_img is None:
@@ -8707,6 +8884,11 @@ def selftest(report: str) -> int:
             "title": "Combat", "notes": "Tanks, biplanes and jets in 27 games.", "publisher": "Atari", "year": "1977"}),
             700)
         check("back cover", back.height == 700 and back.getchannel("A").getextrema() == (255, 255), str(back.size))
+        titled = Image.new("RGB", (300, 200), (30, 60, 200))
+        for i in range(4):
+            ImageDraw.Draw(titled).rectangle((30 + i * 60, 60, 60 + i * 60, 140), fill=(230, 30, 30))
+        cut = cut_logo(titled, (10, 10, 290, 190))
+        check("logo from a cover", cut is not None and cut.getchannel("A").getextrema()[0] == 0, str(cut and cut.size))
         check("UMD", umd.size == (400, round(400 * UMD_HEIGHT)) and umd.getpixel((200, 200))[3] == 255
               and umd.getpixel((0, 0))[3] == 0 and umd.getpixel((4, umd.height - 4))[3] == 0,
               f"kind {disc_kind(default_profile(), 'Sony PSP')}")

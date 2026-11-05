@@ -21,7 +21,7 @@ the new pictures into its `Images` folders.
 | `lb_box3d_creator.py` | the whole program |
 | `box model\` | case templates, each with its corner file `.json` (a box3d profile): `AI *.png`, painted with this program's AI window, and the 3 of [box3d](https://github.com/RtaSistemas/box3d) (`box3d-mvs/arcade/dvd.png`, MIT, see `box3d-LICENSE.txt`); also built into the exe |
 | `build.bat` | builds `dist\LB3DBoxCreator-<version>.exe` (`--onefile --windowed --noupx`), copies `box model`, runs the exe's self-test |
-| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; back covers; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
+| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; back covers; logos cut from covers; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
 
 ## Using it
 
@@ -113,6 +113,12 @@ the new pictures into its `Images` folders.
    (box3d)** adds the template profile's top / game / bottom slots (top and bottom from its `assets\logo_top.*`,
    `logo_bottom.*`; without a profile one game slot); the game slot shows the Marquee, else the Clear Logo. Layers
    marked *Only on made-up spines* stay off games that have a real spine picture.
+   **Logo from the cover** (games without a Clear Logo): **▭ Pick the logo on the cover** shows the Box - Front flat;
+   drag a frame round its logo. The logo is cut out — its even ground (the colour round the frame's edge) taken away
+   when the letters can be told from it, else kept as a rectangle — and shown on the tab; **💾 Save as this game's
+   Clear Logo** saves it into LaunchBox's `Clear Logo` folder (`<title>-01.png`, a new file, never over one). From
+   then on the game's made-up spine, its disc and its back cover use it, and so does LaunchBox.
+   Text layers also take `{players}`, `{rating}` and `{notes}`.
 6. **Disc** tab: the game's disc, from its Box - Front: the kind (*from the platform* by default: PlayStation's black
    disc printed to the hub, DVD for PS2 / Xbox / Wii, Blu-ray for PS3 / PS4 / Xbox One / Wii U, the small GameCube
    disc, the PSP's **UMD** — its white shell, round at the top, with the round label and its white middle, as on real
