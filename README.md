@@ -127,7 +127,17 @@ the new pictures into its `Images` folders.
    SNES 15 %, Mega Drive / Genesis 18 %, N64 15.5 %, Game Boy 13.5 %, GBA 14 %, Atari 2600 25 %, DS 11 %, HuCard 4 %…,
    16 % for others), or is set by hand. A photo with transparency (most of LaunchBox's) gives the cleanest outline; one
    without loses its even background only when the cartridge can be told from it (not a grey cartridge on grey), else
-   it is used whole. A game without a Cart - Front gets no cartridge. **Cart** in the view buttons shows it.
+   it is used whole. **Cart** in the view buttons shows it.
+   **Games without a Cart - Front** (many: on 11 of the author's platforms, 1714 games have a cover but no cartridge
+   photo, NES Europe all of its 316) get one from their **cover**: choose one real photo of the platform's cartridge
+   (**Use this game's Cart - Front**, or **Choose a picture…** — a transparent background is best), and its label is
+   found by itself (shown in a blue frame; four sliders move it, **↻ Find the label** looks again). Each game without a
+   Cart - Front then gets its Box - Front on that label (cut to the label's shape — a label much wider than the cover,
+   like the Master System's strip, takes the cover's top with the title — or stretched), and is made in 3D like a
+   photo. The label is found as the biggest patch unlike the plastic that fills most of its rectangle; it was right on
+   NES, SNES, Mega Drive / Genesis, N64, Game Boy, Game Boy Color, GBA, Atari 2600, Master System and DS photos. Parts
+   of the photo outside the label stay as they are (the Atari 2600's end label, text round a Genesis label): move the
+   sliders to cover them. The info line says "Cart - Front: made from the cover".
 8. **Save** tab: **What to make** (Box - 3D, Disc, Cart - 3D, any of them), **Save this game to LaunchBox**, **Export
    this game to a file…** (the picture shown: the disc or cartridge in their views), or make them for the selected
    games / the games in the list

@@ -104,6 +104,67 @@ class Shapes(unittest.TestCase):
         self.assertEqual(m.render_cart(prof, pics, "NES", 400).height, 400)
 
 
+class FromCovers(unittest.TestCase):
+    """Games without a Cart - Front: their cover on the label of the platform's cartridge photo."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.donor = Path(self.tmp.name) / "donor.png"
+        cartridge().save(self.donor)
+        self.prof = dict(m.default_profile(), cart_donor=str(self.donor), cart_label_l=0.225, cart_label_t=0.114,
+                         cart_label_r=0.775, cart_label_b=0.684)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_label_found(self):
+        found = m.find_cart_label(cartridge())
+        for got, want in zip(found, (90 / 400, 50 / 440, 310 / 400, 301 / 440)):   # the red label
+            self.assertAlmostEqual(got, want, delta=0.03)
+        on_white = m.find_cart_label(cartridge(ground=(250, 250, 250)))             # its ground taken away first
+        for got, want in zip(on_white, found):
+            self.assertAlmostEqual(got, want, delta=0.03)
+        plain = Image.new("RGBA", (300, 300), PLASTIC + (255,))                      # no label: a guess
+        self.assertEqual(tuple(round(v, 2) for v in m.find_cart_label(plain)), m.CART_LABEL)
+
+    def test_cover_on_the_label(self):
+        blue = Image.new("RGB", (300, 420), (20, 60, 220))
+        front = m.generic_cart_front(self.prof, blue)
+        self.assertEqual(front.size, (400, 440))
+        self.assertTrue(near(front.getpixel((200, 175)), (20, 60, 220)))            # the cover on the label
+        self.assertTrue(near(front.getpixel((40, 340)), PLASTIC))                   # the plastic stays
+        self.assertEqual(front.getpixel((5, 5))[3], 0)                              # and so does the ground
+        stretched = m.generic_cart_front(dict(self.prof, cart_label_fit="stretch"), blue)
+        self.assertTrue(near(stretched.getpixel((200, 175)), (20, 60, 220)))
+        self.assertIsNone(m.generic_cart_front(dict(self.prof, cart_generic=False), blue))
+        self.assertIsNone(m.generic_cart_front(dict(self.prof, cart_donor=""), blue))
+        self.assertIsNone(m.generic_cart_front(dict(self.prof, cart_donor=str(self.donor) + "x"), blue))
+        self.assertIsNone(m.generic_cart_front(self.prof, None))
+        self.assertTrue(m.cart_cover_ready(self.prof))
+        self.assertFalse(m.cart_cover_ready(m.default_profile()))
+        img = m.render_cart(self.prof, m.Pictures(front=blue.convert("RGBA")), "NES", 400)
+        self.assertEqual(img.height, 400)
+        self.assertGreater(count(img, lambda px: px[2] > 150 and px[0] < 80), 3000)   # the cover, turned
+
+    def test_saved_from_covers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lb = make_lb(tmp, [("Has Cart", ""), ("Cover Only", ""), ("Nothing", "")], {
+                "Box - Front": [("", "Has Cart-01.png", cover((200, 30, 30))),
+                                ("", "Cover Only-01.png", cover((20, 60, 220)))],
+                "Cart - Front": [("", "Has Cart-01.png", cartridge())]})
+            games = lb.games(PLATFORM)
+            found = [lb.find(PLATFORM, g, self.prof) for g in games]
+            self.assertEqual(m.batch_plan(found, "skip", True, False, (m.CART_TYPE,), cart_cover=True), (2, 0, 1, 0))
+            self.assertEqual(m.batch_plan(found, "skip", True, False, (m.CART_TYPE,)), (1, 0, 2, 0))
+            export = {"region": "same", "existing": "skip", "format": "png", "jpg_bg": "#ffffff", "max_height": 300,
+                      "trim": True, "threads": 2, "make_box": False, "make_disc": False, "make_cart": True}
+            counts = m.batch_make(lb, PLATFORM, games, self.prof, None, None, export, threading.Event(),
+                                  lb.root / "Backups", 300)
+            self.assertEqual((counts["carts"], counts["cartcovers"], counts["nocart"], counts["errors"]), (2, 1, 1, 0))
+            self.assertTrue((lb.media_folder(PLATFORM, m.CART_TYPE) / "Cover Only-01.png").is_file())
+            self.assertFalse((lb.media_folder(PLATFORM, m.CART_TYPE) / "Nothing-01.png").exists())
+
+
 class Saving(unittest.TestCase):
     def test_found_and_saved(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -207,6 +268,40 @@ class Window(unittest.TestCase):
                                   and app.pics is not None))
         app.draw()                                                   # "no Cart - Front" instead of a picture
         self.assertIn("Cart - Front: none", app.info_label["text"])
+
+    def test_cartridge_from_the_cover(self):
+        app = self.app
+        self.assertTrue(self.wait(lambda: app.lb is not None), "LaunchBox not loaded")
+        app.select_platform(PLATFORM)
+        self.assertTrue(self.wait(lambda: len(app.games) == 2 and app.pics is not None), "games not loaded")
+        cart = next(i for i, g in enumerate(app.games) if g.title == "Cart Game")
+        app.show_game(cart)
+        self.assertTrue(self.wait(lambda: app.pics is not None and app.pics.cart_front is not None))
+        self.assertIn("No cartridge chosen", app.cart_donor_text["text"])
+        app.use_game_cart()                                          # its photo, for the others' covers
+        self.assertTrue(app.profile["cart_donor"].endswith("Cart Game-01.png"))
+        self.assertAlmostEqual(app.profile["cart_label_l"], 90 / 400, delta=0.03)
+        self.assertIsNotNone(app.cart_donor_photo)
+        self.assertIn("Cart Game-01.png", app.cart_donor_text["text"])
+        self.lb.media_folder(PLATFORM, "Box - Front").mkdir(parents=True, exist_ok=True)
+        cover((20, 60, 220)).save(self.lb.media_folder(PLATFORM, "Box - Front") / "Bare Game-01.png")
+        app.lb.forget_indexes()                                      # as after a Reload
+        app.refresh_statuses()
+        bare = next(i for i, g in enumerate(app.games) if g.title == "Bare Game")
+        self.assertTrue(self.wait(lambda: app.found.get(bare, {}).get("front")), "new cover not found")
+        app.show_game(bare)
+        self.assertTrue(self.wait(lambda: app.current.title == "Bare Game" and app.pics is not None
+                                  and app.pics.front is not None))
+        app.set_view("cart")
+        app.draw()
+        self.assertIsNotNone(app.photo)
+        self.assertIn("Cart - Front: made from the cover", app.info_label["text"])
+        app.cfg["export"].update(make_box=False, make_cart=True)
+        app.save_one(False)
+        self.assertTrue(self.wait(lambda: app.status_text.startswith("Saved")), app.status_text)
+        self.assertTrue((self.lb.media_folder(PLATFORM, m.CART_TYPE) / "Bare Game-01.png").is_file())
+        app.undo()                                                   # the photo's choice can be undone
+        self.assertEqual(app.profile["cart_donor"], "")
 
 
 if __name__ == "__main__":

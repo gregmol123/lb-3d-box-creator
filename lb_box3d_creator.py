@@ -41,7 +41,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -755,6 +755,13 @@ def default_profile() -> dict:
         "cart_depth": 0.16,        # ...or this part of the width
         "cart_background": "auto",  # a photo without transparency: auto (even background taken away) | keep
         "cart_sheen": True,
+        "cart_generic": True,      # no Cart - Front: the game's cover on the label of the platform's cartridge photo
+        "cart_donor": "",          # ...that photo
+        "cart_label_l": 0.2,       # ...where its label is (parts of the photo)
+        "cart_label_t": 0.12,
+        "cart_label_r": 0.8,
+        "cart_label_b": 0.62,
+        "cart_label_fit": "fill",  # fill (cut to the label's shape) | stretch
     }
 
 
@@ -1795,9 +1802,8 @@ def _background_away(img):
     return None
 
 
-def cart_cutout(img, mode: str = "auto"):
-    """The cartridge alone, cropped: the photo's own transparency; else, in "auto", its even background taken away
-    when the cartridge can be told from it; else ("keep", or when it cannot) the whole picture."""
+def _cart_cut(img, mode: str = "auto"):
+    """(the cartridge alone, cropped; the crop's box in the picture)."""
     img = img.convert("RGBA")
     alpha = img.getchannel("A")
     if alpha.getextrema()[0] >= 200 and mode == "auto":
@@ -1806,20 +1812,153 @@ def cart_cutout(img, mode: str = "auto"):
             img = img.copy()
             img.putalpha(ImageChops.multiply(mask, alpha))
     box = img.getchannel("A").point([0] * 9 + [255] * 247).getbbox()
-    return img.crop(box) if box else img
+    return (img.crop(box), box) if box else (img, (0, 0) + img.size)
+
+
+def cart_cutout(img, mode: str = "auto"):
+    """The cartridge alone, cropped: the photo's own transparency; else, in "auto", its even background taken away
+    when the cartridge can be told from it; else ("keep", or when it cannot) the whole picture."""
+    return _cart_cut(img, mode)[0]
+
+
+# A game without a Cart - Front gets one from its cover: one real photo of the platform's cartridge (the "donor",
+# chosen per platform) with the game's Box - Front laid on its label, whose place is found on the photo and can be
+# moved with the Cart tab's sliders.
+CART_LABEL = (0.2, 0.12, 0.8, 0.62)        # where a label is guessed to be when none is found
+_donors: dict = {}
+_donor_lock = threading.Lock()
+
+
+def _biggest_patch(mask):
+    """The biggest connected patch of a small mask: (left, top, right, bottom) as parts of it, and its pixel count."""
+    w, h = mask.size
+    data, seen = mask.tobytes(), bytearray(w * h)
+    best, best_n = None, 0
+    for start in range(w * h):
+        if data[start] < 128 or seen[start]:
+            continue
+        seen[start], stack, n = 1, [start], 0
+        x0 = y0 = w + h
+        x1 = y1 = -1
+        while stack:
+            p = stack.pop()
+            n += 1
+            y, x = divmod(p, w)
+            x0, x1, y0, y1 = min(x0, x), max(x1, x), min(y0, y), max(y1, y)
+            for q in (p - 1 if x > 0 else -1, p + 1 if x < w - 1 else -1, p - w, p + w):
+                if 0 <= q < w * h and not seen[q] and data[q] >= 128:
+                    seen[q] = 1
+                    stack.append(q)
+        if n > best_n:
+            best, best_n = (x0 / w, y0 / h, (x1 + 1) / w, (y1 + 1) / h), n
+    return best, best_n
+
+
+def find_cart_label(img, mode: str = "auto"):
+    """Where the label is on a cartridge photo, as parts of the picture (left, top, right, bottom): the biggest patch
+    inside the cartridge unlike its plastic, from a loose to a strict measure of "unlike" (shaded or black plastic
+    joins a loose patch). A label is a solid rectangle: a patch filling little of its box, or covering nearly the
+    whole cartridge, is not one."""
+    cut, (bx0, by0, bx1, by1) = _cart_cut(img, mode)
+    plastic = _cart_rim_colour(cut)
+    small = cut.copy()
+    small.thumbnail((160, 160))
+    w, h = small.size
+    r, g, b = ImageChops.difference(small.convert("RGB"), Image.new("RGB", small.size, plastic)).split()
+    diff = ImageChops.lighter(ImageChops.lighter(r, g), b)
+    solid = small.getchannel("A").point([0] * 129 + [255] * 127)
+    area = ImageStat.Stat(solid).mean[0] / 255 * w * h
+    found = CART_LABEL
+    for threshold in (48, 96, 150):
+        other = diff.point([0] * (threshold + 1) + [255] * (255 - threshold))
+        other = ImageChops.multiply(other, solid).filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.MinFilter(3))
+        best, n = _biggest_patch(other)
+        if best is None or n < 0.04 * area:
+            continue
+        bw, bh = best[2] - best[0], best[3] - best[1]
+        if n / max(1.0, bw * w * bh * h) >= 0.5 and not (bw > 0.9 and bh > 0.9):
+            found = best
+            break
+    fl, ft, fr, fb = found
+    cw, ch, iw, ih = bx1 - bx0, by1 - by0, img.width, img.height
+    return (bx0 + fl * cw) / iw, (by0 + ft * ch) / ih, (bx0 + fr * cw) / iw, (by0 + fb * ch) / ih
+
+
+def cart_donor(path: str):
+    """The cartridge photo covers are put on, kept loaded (None when it cannot be read)."""
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (path, st.st_mtime_ns, st.st_size)
+    with _donor_lock:
+        hit = _donors.get(key)
+    if hit is None:
+        try:
+            hit = load_picture(path, 2000)
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
+            log_line(f"cartridge photo {path}: {exc}")
+            return None
+        with _donor_lock:
+            if len(_donors) > 8:
+                _donors.clear()
+            _donors[key] = hit
+    return hit
+
+
+def cart_cover_ready(profile: dict) -> bool:
+    """Do games without a Cart - Front get one from their cover (switched on, and the photo can be read)?"""
+    return bool(profile.get("cart_generic", True)) and cart_donor(profile.get("cart_donor", "")) is not None
+
+
+def cart_label_box(profile: dict, size):
+    """The label's place on the cartridge photo in pixels (left, top, right, bottom)."""
+    w, h = size
+    keys = ("cart_label_l", "cart_label_t", "cart_label_r", "cart_label_b")
+    l, t, r, b = (min(1.0, max(0.0, float(profile.get(k, d)))) for k, d in zip(keys, CART_LABEL))
+    (l, r), (t, b) = sorted((l, r)), sorted((t, b))
+    x0, y0 = round(l * w), round(t * h)
+    return x0, y0, max(x0 + 2, round(r * w)), max(y0 + 2, round(b * h))
+
+
+def generic_cart_front(profile: dict, cover):
+    """A Cart - Front for a game without one: the platform's cartridge photo with the game's cover on its label (cut
+    to the label's shape, or stretched); None without such a photo or a cover."""
+    if cover is None or not profile.get("cart_generic", True):
+        return None
+    donor = cart_donor(profile.get("cart_donor", ""))
+    if donor is None:
+        return None
+    x0, y0, x1, y1 = cart_label_box(profile, donor.size)
+    if profile.get("cart_label_fit", "fill") == "stretch":
+        art = cover.convert("RGBA").resize((x1 - x0, y1 - y0), LANCZOS)
+    else:                           # a label much wider than the cover (a Master System strip) gets its top: the title
+        wide = (x1 - x0) / (y1 - y0) > 2 * cover.width / max(1, cover.height)
+        art = ImageOps.fit(cover.convert("RGBA"), (x1 - x0, y1 - y0), LANCZOS, centering=(0.5, 0.0 if wide else 0.5))
+    out = donor.copy()
+    label = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    label.paste(art, (x0, y0))
+    label.putalpha(ImageChops.multiply(label.getchannel("A"), out.getchannel("A")))   # only on the cartridge
+    out.alpha_composite(label)
+    return out
 
 
 def _cart_rim_colour(cut):
-    """The colour of the cartridge's plastic: the mean of the band along its outline."""
+    """The colour of the cartridge's plastic: the median of the band along its outline (a label reaching the edge
+    does not change it)."""
     small = cut.copy()
     small.thumbnail((240, 240))
+    band = max(3, (min(small.size) // 14) | 1)
+    small = ImageOps.expand(small, band, (0, 0, 0, 0))         # the band runs along the picture's edge too
     solid = small.getchannel("A").point([0] * 129 + [255] * 127)
-    rim = ImageChops.subtract(solid, solid.filter(ImageFilter.MinFilter(max(3, (min(small.size) // 14) | 1))))
+    rim = ImageChops.subtract(solid, solid.filter(ImageFilter.MinFilter(band)))
     if not rim.getbbox():
         rim = solid
     if not rim.getbbox():
         return 96, 96, 96
-    return tuple(int(v) for v in ImageStat.Stat(small.convert("RGB"), rim).mean)
+    return tuple(int(v) for v in ImageStat.Stat(small.convert("RGB"), rim).median)
 
 
 def cart_layout(front_wh, depth: float, turn: float, tilt: float, perspective: float, height: int):
@@ -1915,10 +2054,14 @@ def make_cart(art, profile: dict, platform: str = "", height: int = 1000, fast: 
 
 
 def render_cart(profile: dict, pics, platform: str = "", height: int = 1000, fast: bool = False):
-    """The cartridge of one game in 3D, from its Cart - Front; None when it has none."""
-    if pics.cart_front is None:
-        return None
-    return make_cart(pics.cart_front, profile, platform, height, fast)
+    """The cartridge of one game in 3D, from its Cart - Front, else from its cover on the platform's cartridge photo;
+    None when neither is there."""
+    art = pics.cart_front
+    if art is None:
+        art = generic_cart_front(profile, pics.front)
+        if art is None:
+            return None
+    return make_cart(art, profile, platform, height, fast)
 
 
 def case_window(face: str, size, rim_frac: float):
@@ -2792,8 +2935,8 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
     """Make and save the Box - 3D, the Disc and / or the Cart - 3D of many games (several threads). A game with no
     Box - Front gets its cover from the web first when the settings say so, else a generic cover; a cartridge needs
     the game's Cart - Front. Returns counts of what happened."""
-    counts = {"saved": 0, "discs": 0, "carts": 0, "covers": 0, "generic": 0, "skipped": 0, "nofront": 0, "nocart": 0,
-              "errors": 0, "dup": 0}
+    counts = {"saved": 0, "discs": 0, "carts": 0, "cartcovers": 0, "covers": 0, "generic": 0, "skipped": 0,
+              "nofront": 0, "nocart": 0, "errors": 0, "dup": 0}
     targets, lock = set(), threading.Lock()
     fmt = export.get("format", "png")
     max_h = int(export.get("max_height") or 0)
@@ -2801,6 +2944,7 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
     for kind in kinds:
         lb.index(platform, kind, refresh=True)
     needs_front = profile["faces"]["front"].get("source") == "launchbox"
+    cart_cover = CART_TYPE in kinds and cart_cover_ready(profile)
 
     def claim(path):
         with lock:
@@ -2820,7 +2964,7 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
             if not plan:
                 return ["skipped"], game, ""
             done_here, info = [], ""
-            if any(kind == CART_TYPE for kind, _t in plan) and not found.get("cart_front"):
+            if any(kind == CART_TYPE for kind, _t in plan) and not found.get("cart_front") and not cart_cover:
                 done_here.append("nocart")                       # nothing to make its cartridge from
                 plan = [(kind, target) for kind, target in plan if kind != CART_TYPE]
                 if not plan:
@@ -2855,6 +2999,8 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
                     if img is None:
                         done_here.append("nocart")
                         continue
+                    if pics.cart_front is None:
+                        done_here.append("cartcovers")           # made from the cover on the platform's cartridge
                     out = finish_picture(img, max_h, bool(export.get("trim", True)), fmt,
                                          export.get("jpg_bg", "#ffffff"))
                 else:
@@ -2909,10 +3055,11 @@ def made_kinds(export: dict) -> list:
 
 
 def batch_plan(found_list, existing: str = "skip", need_front: bool = True, generic: bool = False,
-               kinds=(OUT_TYPE,), web: bool = False):
+               kinds=(OUT_TYPE,), web: bool = False, cart_cover: bool = False):
     """What a run would do: (games to make something for, games skipped as all they need is there, games left out
     as they have nothing to make it from (no Box - Front, no Cart - Front), games among those to make that have no
-    Box - Front: a cover from the web or a generic one)."""
+    Box - Front: a cover from the web or a generic one). cart_cover: games without a Cart - Front get one from their
+    Box - Front."""
     make = skip = nofront = covers = 0
     boxes = [k for k in kinds if k != CART_TYPE]
     for found in found_list:
@@ -2920,12 +3067,13 @@ def batch_plan(found_list, existing: str = "skip", need_front: bool = True, gene
         blocked = missing and not (generic or web)         # no Box - Front and nothing to make one from
         todo = [] if blocked else [k for k in boxes if not (existing == "skip" and found.get(MEDIA_KEYS[k]))]
         cart_there = existing == "skip" and found.get("cart3d")
-        if CART_TYPE in kinds and found.get("cart_front") and not cart_there:
+        has_cart = found.get("cart_front") or cart_cover and found.get("front")
+        if CART_TYPE in kinds and has_cart and not cart_there:
             todo.append(CART_TYPE)
         if todo:
             make += 1
             covers += missing and any(k != CART_TYPE for k in todo)
-        elif blocked or CART_TYPE in kinds and not found.get("cart_front") and not cart_there:
+        elif blocked or CART_TYPE in kinds and not has_cart and not cart_there:
             nofront += 1
         else:
             skip += 1
@@ -3950,9 +4098,9 @@ TEXTS = {
     "stop": "■ Stop", "ready": "Ready.",
     "batch_progress": "{done}/{total} · 3D {saved} · discs {discs} · carts {carts} · web covers {covers} · generic "
                       "{generic} · skipped {skipped} · errors {errors}",
-    "batch_done": "Done ({platform}): Box - 3D {saved}, discs {discs}, Cart - 3D {carts}, covers from the web {covers}, "
-                  "generic covers {generic}, skipped (all there) {skipped}, no Box - Front {nofront}, no Cart - Front "
-                  "{nocart}, repeated titles {dup}, errors {errors}.",
+    "batch_done": "Done ({platform}): Box - 3D {saved}, discs {discs}, Cart - 3D {carts} ({cartcovers} from covers), "
+                  "covers from the web {covers}, generic covers {generic}, skipped (all there) {skipped}, no Box - Front "
+                  "{nofront}, no Cart - Front {nocart}, repeated titles {dup}, errors {errors}.",
     "batch_stopped": "Stopped.",
     "confirm_batch": "Make pictures for {n} games?\n\nPlatform: {platform}\nMaking: {what}\nBox: {template}\n"
                      "When the picture is there: {policy}\nFolder: {folder}\n\n"
@@ -4011,7 +4159,22 @@ TEXTS = {
     "cart_note": "Cartridges are made from the game's Cart - Front (a photo of the whole cartridge) and saved as "
                  "LaunchBox's “Cart - 3D” pictures (Save tab: What to make), as high as a Box - 3D.",
     "cart_show": "👁 Show the cartridge in the preview",
-    "no_cart_front": "This game has no Cart - Front (a photo of its cartridge).",
+    "no_cart_front": "This game has no Cart - Front (a photo of its cartridge) — or, to make one from its cover, "
+                     "choose a cartridge of this platform on the Cart tab (3.).",
+    "cart_gen_section": "3. Games without a Cart - Front",
+    "cart_gen_on": "Put the game's cover on the label of this platform's cartridge",
+    "cart_donor_none": "No cartridge chosen yet.", "cart_donor_is": "Cartridge: {name}",
+    "cart_donor_missing": "Cartridge: {name} — cannot be read",
+    "cart_use_game": "Use this game's Cart - Front", "cart_choose": "Choose a picture…",
+    "cart_find_label": "↻ Find the label",
+    "cart_label_l": "Label: left", "cart_label_t": "Label: top", "cart_label_r": "Label: right",
+    "cart_label_b": "Label: bottom",
+    "cart_fit": "Cover on the label", "cart_fit_fill": "Fill (cut to fit)", "cart_fit_stretch": "Stretch",
+    "cart_gen_note": "Choose one real photo of this platform's cartridge (a transparent background is best: a game's "
+                     "Cart - Front, or any picture); its label is found by itself (the blue frame) and can be moved "
+                     "with the sliders. Each game without a Cart - Front then gets its Box - Front on that label.",
+    "cart_from_cover": "made from the cover", "cart_donor_set": "Cartridge for the covers: {path}",
+    "cart_use_none": "This game has no Cart - Front to use: pick a game that has one, or choose a picture.",
     "nothing_chosen": "Choose what to make (Box - 3D, Disc or Cart - 3D) at the top of the Save tab.",
     "nothing_to_make": "Nothing to make: of {n} games, {skip} already have what was asked for and {nofront} have "
                        "nothing to make it from (no Box - Front, or no Cart - Front for a cartridge).",
@@ -4396,6 +4559,10 @@ class App:
                 self.update_info()
         if scope == "profile" and key == "cart_depth_auto":
             self.update_platform_labels()
+        if scope == "profile" and key.startswith("cart_"):
+            self.update_cart_donor_view()
+            if key in ("cart_generic", "cart_donor"):
+                self.update_info()
         if scope == "layer":
             self.refresh_layers(keep=True)
         self.schedule_save()
@@ -5066,6 +5233,30 @@ class App:
         self.label(body, self.t("cart_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(8, 0))
         self.button(body, self.t("cart_show"), lambda: self.set_view("cart")).pack(anchor="w", pady=(6, 0))
 
+        body = self.section(parent, self.t("cart_gen_section"))
+        var = tk.BooleanVar()
+        self.check(body, self.t("cart_gen_on"), var).pack(fill="x")
+        self.bind_var(var, "profile", "cart_generic", bool)
+        self.cart_donor_text = self.label(body, "", SOFT, 8, wraplength=self.px(370))
+        self.cart_donor_text.pack(fill="x", pady=(4, 0))
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(4, 0))
+        self.button(row, self.t("cart_use_game"), self.use_game_cart).pack(side="left")
+        self.button(row, self.t("cart_choose"), self.choose_cart_donor).pack(side="left", padx=(6, 0))
+        self.button(row, self.t("cart_find_label"), self.find_label).pack(side="left", padx=(6, 0))
+        self.cart_donor_view = tk.Label(body, bg=PANEL2, bd=0)
+        self.cart_donor_view.pack(anchor="w", pady=(6, 0))
+        for key in ("cart_label_l", "cart_label_t", "cart_label_r", "cart_label_b"):
+            self.slider(body, self.t(key), "profile", key, 0, 1, 0.002, lambda v: f"{v * 100:.1f}%")
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(6, 0))
+        self.label(row, self.t("cart_fit")).pack(side="left")
+        var = tk.StringVar()
+        for value, key in (("fill", "cart_fit_fill"), ("stretch", "cart_fit_stretch")):
+            self.radio(row, self.t(key), var, value).pack(side="left", padx=(10, 0))
+        self.bind_var(var, "profile", "cart_label_fit", str)
+        self.label(body, self.t("cart_gen_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(8, 0))
+
     def build_export_tab(self, parent):
         body = self.section(parent, self.t("what_section"))
         row = tk.Frame(body, bg=PANEL2)
@@ -5483,8 +5674,13 @@ class App:
             parts.append(f"{self.t('info_disc')}: " + (self.t("has3d", n=ndisc) if ndisc else self.t("no3d")))
         ncart = len(f.get("cart3d") or [])
         if ncart or f.get("cart_front") or self.view == "cart" or self.cfg["export"].get("make_cart"):
-            parts.append(f"{self.t('info_cart_front')}: "
-                         + (self.t("cart_front_yes") if f.get("cart_front") else self.t("src_none")))
+            if f.get("cart_front"):
+                source = self.t("cart_front_yes")
+            elif f.get("front") and cart_cover_ready(self.profile):
+                source = self.t("cart_from_cover")
+            else:
+                source = self.t("src_none")
+            parts.append(f"{self.t('info_cart_front')}: {source}")
             parts.append(f"{self.t('info_cart')}: " + (self.t("has3d", n=ncart) if ncart else self.t("no3d")))
         self.info_label.configure(text="   ·   ".join(parts))
 
@@ -5681,6 +5877,75 @@ class App:
             depth = cart_depth({"cart_depth_auto": True}, self.platform)
             self.cart_depth_check.configure(text=self.t("cart_depth_auto", pct=f"{depth * 100:.1f}".rstrip("0")
                                                         .rstrip(".")))
+        self.update_cart_donor_view()
+
+    # ------------------------------------------------------------------------------------------- cartridge photo
+    def update_cart_donor_view(self):
+        """The Cart tab's small picture of the platform's cartridge photo, its label in a blue frame."""
+        if not hasattr(self, "cart_donor_view"):
+            return
+        path = self.profile.get("cart_donor", "")
+        donor = cart_donor(path)
+        if not path:
+            text = self.t("cart_donor_none")
+        else:
+            text = self.t("cart_donor_is" if donor is not None else "cart_donor_missing", name=Path(path).name)
+        self.cart_donor_text.configure(text=text)
+        if donor is None:
+            self.cart_donor_view.configure(image="")
+            self.cart_donor_photo = None
+            return
+        cached = getattr(self, "_donor_thumb", None)
+        if cached is None or cached[0] is not donor:
+            thumb = donor.copy()
+            thumb.thumbnail((self.px(260), self.px(170)), LANCZOS)
+            self._donor_thumb = cached = (donor, thumb)
+        thumb = cached[1]
+        ground = Image.new("RGBA", thumb.size, hex_rgb(PANEL2) + (255,))
+        ground.alpha_composite(thumb)
+        x0, y0, x1, y1 = cart_label_box(self.profile, thumb.size)
+        ImageDraw.Draw(ground).rectangle((x0, y0, x1 - 1, y1 - 1), outline=(0, 170, 255, 255), width=max(2, self.px(2)))
+        self.cart_donor_photo = ImageTk.PhotoImage(ground, master=self.root)
+        self.cart_donor_view.configure(image=self.cart_donor_photo)
+
+    def set_cart_donor(self, path):
+        """This platform's cartridge photo for the covers: its label found, the sliders set to it."""
+        donor = cart_donor(path)
+        if donor is None:
+            self.inform(self.t("cart_donor_missing", name=Path(path).name))
+            return
+        self.remember()
+        left, top, right, bottom = find_cart_label(donor, self.profile.get("cart_background", "auto"))
+        self.profile.update(cart_donor=str(path), cart_generic=True, cart_label_l=round(left, 4),
+                            cart_label_t=round(top, 4), cart_label_r=round(right, 4), cart_label_b=round(bottom, 4))
+        self.sync_controls()
+        self.update_info()
+        self.schedule_save()
+        self.set_status(self.t("cart_donor_set", path=path))
+        self.request_draw()
+
+    def use_game_cart(self):
+        path = self.current_found.get("cart_front") if self.current is not None else None
+        if not path:
+            self.inform(self.t("cart_use_none"))
+            return
+        self.set_cart_donor(path)
+
+    def choose_cart_donor(self):
+        folder = self.lb.media_folder(self.platform, CART_FRONT_TYPE) if self.lb and self.platform else None
+        path = filedialog.askopenfilename(parent=self.root, title=self.t("pick_picture"),
+                                          initialdir=str(folder) if folder and folder.is_dir() else None,
+                                          filetypes=[(self.t("images"), "*.png *.webp *.jpg *.jpeg *.bmp"),
+                                                     (self.t("all_files"), "*.*")])
+        if path:
+            self.set_cart_donor(path)
+
+    def find_label(self):
+        path = self.profile.get("cart_donor", "")
+        if cart_donor(path) is None:
+            self.inform(self.t("cart_donor_none"))
+            return
+        self.set_cart_donor(path)
 
     def open_ai_dialog(self):
         if self.ai_dialog is not None and not self.ai_dialog.closed:
@@ -6284,7 +6549,8 @@ class App:
         if not kinds:
             self.inform(self.t("nothing_chosen"))
             return
-        if CART_TYPE in kinds and not self.current_found.get("cart_front"):
+        if CART_TYPE in kinds and not self.current_found.get("cart_front") and not (
+                cart_cover_ready(profile) and (self.current_found.get("front") or "front" in overrides)):
             if kinds == [CART_TYPE]:
                 messagebox.showwarning(APP_NAME, self.t("no_cart_front"), parent=self.root)
                 return
@@ -6400,7 +6666,8 @@ class App:
         web = bool(where)
         generic = bool(profile.get("generic_cover", True))
         make, skip, nofront, covers = batch_plan([self.found.get(i, {}) for i in idx], export.get("existing", "skip"),
-                                                 needs_front, generic, kinds, web)
+                                                 needs_front, generic, kinds, web,
+                                                 CART_TYPE in kinds and cart_cover_ready(profile))
         if not make:
             self.inform(self.t("nothing_to_make", n=len(idx), skip=skip, nofront=nofront))
             return
@@ -8176,6 +8443,15 @@ def selftest(report: str) -> int:
         made = make_cart(shell, default_profile(), "Nintendo Entertainment System", 300)
         check("cartridge", made.height == 300 and made.getpixel((0, 0))[3] == 0 and made.width > 250,
               f"{made.size} thickness {cart_depth(default_profile(), 'NES')}")
+        ImageDraw.Draw(shell).rectangle((90, 50, 309, 300), fill=(210, 40, 40, 255))
+        with tempfile.TemporaryDirectory() as tmp2:
+            shell.save(Path(tmp2) / "donor.png")
+            label = find_cart_label(shell)
+            on_label = generic_cart_front(dict(default_profile(), cart_donor=str(Path(tmp2) / "donor.png"),
+                                               **dict(zip(("cart_label_l", "cart_label_t", "cart_label_r",
+                                                           "cart_label_b"), label))), front)
+            check("cartridge from a cover", on_label is not None and on_label.size == shell.size
+                  and abs(label[0] - 90 / 400) < 0.03, f"label {tuple(round(v, 3) for v in label)}")
         check("UMD", umd.size == (400, round(400 * UMD_HEIGHT)) and umd.getpixel((200, 200))[3] == 255
               and umd.getpixel((0, 0))[3] == 0 and umd.getpixel((4, umd.height - 4))[3] == 0,
               f"kind {disc_kind(default_profile(), 'Sony PSP')}")
