@@ -42,7 +42,7 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk, PngImagePlugin
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -2306,6 +2306,11 @@ def made_here(path) -> bool:
     return mark.startswith(APP_NAME)
 
 
+def others_picture(paths) -> bool:
+    """Is any of these pictures one this program did not make (a scan, LaunchBox's download, someone's render)?"""
+    return any(not made_here(p) for p in paths or [])
+
+
 def case_window(face: str, size, rim_frac: float):
     """Where the art sits inside a keep case's rim on a w x h face: (x0, y0, x1, y1)."""
     w, h = size
@@ -3198,7 +3203,7 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
     Box - Front gets its cover from the web first when the settings say so, else a generic cover; a cartridge needs
     the game's Cart - Front. Returns counts of what happened."""
     counts = {"saved": 0, "discs": 0, "carts": 0, "cartcovers": 0, "backs": 0, "covers": 0, "generic": 0,
-              "skipped": 0, "nofront": 0, "nocart": 0, "errors": 0, "dup": 0}
+              "skipped": 0, "kept": 0, "nofront": 0, "nocart": 0, "errors": 0, "dup": 0}
     targets, lock = set(), threading.Lock()
     fmt = export.get("format", "png")
     max_h = int(export.get("max_height") or 0)
@@ -3226,9 +3231,15 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
             if not plan:
                 return ["skipped"], game, ""
             done_here, info = [], ""
-            if any(kind == CART_TYPE for kind, _t in plan) and not found.get("cart_front") and not cart_cover:
-                done_here.append("nocart")                       # nothing to make its cartridge from
-                plan = [(kind, target) for kind, target in plan if kind != CART_TYPE]
+            # A picture made up here (a generic cover, a cartridge from the cover) never takes the place of one
+            # someone else made: on Replace, that game keeps it.
+            if any(kind == CART_TYPE for kind, _t in plan) and not found.get("cart_front"):
+                if not cart_cover:
+                    done_here.append("nocart")                   # nothing to make its cartridge from
+                    plan = [(kind, target) for kind, target in plan if kind != CART_TYPE]
+                elif any(kind == CART_TYPE and others_picture(t[2]) for kind, t in plan):
+                    done_here.append("kept")
+                    plan = [(kind, target) for kind, target in plan if kind != CART_TYPE]
                 if not plan:
                     return done_here, game, ""
             if needs_front and not found.get("front") and any(kind in FRONT_KINDS for kind, _t in plan):
@@ -3239,7 +3250,15 @@ def batch_make(lb: LaunchBox, platform: str, games, profile: dict, template, qua
                 if cover is not None:
                     done_here.append("covers")
                 elif profile.get("generic_cover", True):
-                    done_here.append("generic")
+                    keep = [kind for kind, t in plan if kind in FRONT_KINDS and others_picture(t[2])]
+                    if keep:
+                        if "kept" not in done_here:
+                            done_here.append("kept")
+                        plan = [(kind, target) for kind, target in plan if kind not in keep]
+                    if any(kind in FRONT_KINDS for kind, _t in plan):
+                        done_here.append("generic")
+                    if not plan:
+                        return done_here, game, info
                 else:
                     done_here.append("nofront")
                     plan = [(kind, target) for kind, target in plan if kind not in FRONT_KINDS]
@@ -3321,20 +3340,27 @@ def made_kinds(export: dict) -> list:
 
 
 def batch_plan(found_list, existing: str = "skip", need_front: bool = True, generic: bool = False,
-               kinds=(OUT_TYPE,), web: bool = False, cart_cover: bool = False):
+               kinds=(OUT_TYPE,), web: bool = False, cart_cover: bool = False, ours=None):
     """What a run would do: (games to make something for, games skipped as all they need is there, games left out
     as they have nothing to make it from (no Box - Front, no Cart - Front), games among those to make that have no
     Box - Front: a cover from the web or a generic one). cart_cover: games without a Cart - Front get one from their
-    Box - Front."""
+    Box - Front. On Replace, a picture someone else made stays where only a made-up one could take its place (a
+    generic cover when the web is not asked, a cartridge from the cover): such a game counts as skipped.
+    ours(paths): were all these pictures made by this program (default: their Software mark)."""
+    ours = ours or (lambda paths: not others_picture(paths))
     make = skip = nofront = covers = 0
     boxes = [k for k in kinds if k in FRONT_KINDS]
     for found in found_list:
         missing = need_front and bool(boxes) and not found.get("front")
         blocked = missing and not (generic or web)         # no Box - Front and nothing to make one from
         todo = [] if blocked else [k for k in boxes if not (existing == "skip" and found.get(MEDIA_KEYS[k]))]
+        if missing and existing == "replace" and not web:  # only a generic cover could replace theirs
+            todo = [k for k in todo if not found.get(MEDIA_KEYS[k]) or ours(found[MEDIA_KEYS[k]])]
         cart_there = existing == "skip" and found.get("cart3d")
         has_cart = found.get("cart_front") or cart_cover and found.get("front")
-        if CART_TYPE in kinds and has_cart and not cart_there:
+        if CART_TYPE in kinds and has_cart and not cart_there and not (
+                existing == "replace" and not found.get("cart_front") and found.get("cart3d")
+                and not ours(found["cart3d"])):                  # a cartridge from the cover would replace theirs
             todo.append(CART_TYPE)
         if BACK_TYPE in kinds and not found.get("back"):      # (a back already there is kept: a scan, most likely)
             todo.append(BACK_TYPE)
@@ -4370,11 +4396,11 @@ TEXTS = {
     "profile_reset": "Restore factory settings", "log_section": "Log",
     "stop": "■ Stop", "ready": "Ready.",
     "batch_progress": "{done}/{total} · 3D {saved} · discs {discs} · carts {carts} · backs {backs} · web covers "
-                      "{covers} · generic {generic} · skipped {skipped} · errors {errors}",
+                      "{covers} · generic {generic} · skipped {skipped} · kept {kept} · errors {errors}",
     "batch_done": "Done ({platform}): Box - 3D {saved}, discs {discs}, Cart - 3D {carts} ({cartcovers} from covers), "
                   "Box - Back {backs}, covers from the web {covers}, generic covers {generic}, skipped (all there) "
-                  "{skipped}, no Box - Front {nofront}, no Cart - Front {nocart}, repeated titles {dup}, errors "
-                  "{errors}.",
+                  "{skipped}, kept (someone else's picture, no cover to replace it with) {kept}, no Box - Front "
+                  "{nofront}, no Cart - Front {nocart}, repeated titles {dup}, errors {errors}.",
     "batch_stopped": "Stopped.",
     "confirm_batch": "Make pictures for {n} games?\n\nPlatform: {platform}\nMaking: {what}\nBox: {template}\n"
                      "When the picture is there: {policy}\nFolder: {folder}\n\n"
@@ -4385,6 +4411,8 @@ TEXTS = {
     "confirm_missing_generic": ", else a generic cover is made.",
     "confirm_missing_only_generic": "\n{generic} of them have no Box - Front: they get a generic cover.",
     "confirm_missing_end": ".",
+    "confirm_keep_others": "\nA picture someone else made is kept when the new one would be made up (a generic "
+                           "cover, a cartridge from the cover): only a box from a real cover replaces it.",
     "web_failed": "the web could not be reached",
     "up_no_server": "Upscaling: no AI server answers at {url} (start one, see the AI window)",
     "up_no_model": "Upscaling: the AI server has no upscale model (Stability Matrix: Model Browser, an ESRGAN model "
@@ -4483,6 +4511,10 @@ TEXTS = {
     "saved_one": "Saved: {path}", "exported": "Exported: {path}",
     "exists_ask": "This game already has:\n{path}\n\nYes = replace it (the old file goes to Backups)\n"
                   "No = add as another picture\nCancel = do nothing",
+    "exists_ask_made_up": "This game's new picture is made up (no Box - Front: a cover from the web, else a generic "
+                          "one; no Cart - Front: its cover on the platform's cartridge), and it already has a picture "
+                          "someone else made:\n{path}\n\nYes = replace it anyway (the old file goes to Backups)\n"
+                          "No = add as another picture (the current one stays first)\nCancel = do nothing",
     "no_front": "This game has no Box - Front picture.", "busy": "Boxes are being made — wait or stop.",
     "refresh_note": "LaunchBox shows new pictures after a restart (or an image refresh).",
     "error": "Error", "tpl_missing": "Template {name} is missing — using the perspective box.",
@@ -7010,9 +7042,18 @@ class App:
         else:
             found = lb.find(name, game, profile)
             there = [p for kind in kinds for p in (found.get(MEDIA_KEYS[kind]) or [])[:1]]
-            if there and export.get("existing") == "skip":
-                answer = messagebox.askyesnocancel(APP_NAME, self.t("exists_ask", path="\n".join(there)),
-                                                   parent=self.root)
+            no_front = needs_front and not (found.get("front") or "front" in overrides) and profile.get(
+                "generic_cover", True)                               # (else only a box from a web cover is made)
+            made_up = [kind for kind in kinds if kind in FRONT_KINDS and no_front
+                       or kind == CART_TYPE and not found.get("cart_front")]
+            others = [hit[0] for kind in made_up if (hit := lb.index(name, kind).best(game)) and not made_here(hit[0])]
+            question = ""
+            if others and export.get("existing") in ("skip", "replace"):    # theirs, for a made-up one: ask
+                question = self.t("exists_ask_made_up", path="\n".join(others))
+            elif there and export.get("existing") == "skip":
+                question = self.t("exists_ask", path="\n".join(there))
+            if question:
+                answer = messagebox.askyesnocancel(APP_NAME, question, parent=self.root)
                 if answer is None:
                     return
                 export["existing"] = "replace" if answer else "next"
@@ -7117,6 +7158,9 @@ class App:
                 "confirm_missing_generic" if generic else "confirm_missing_end")
         elif covers:
             extra = self.t("confirm_missing_only_generic", generic=covers)
+        if export.get("existing") == "replace" and (needs_front and generic or CART_TYPE in kinds and cart_cover_ready(
+                profile)):
+            extra += self.t("confirm_keep_others")
         what = " + ".join(self.t({OUT_TYPE: "make_box", DISC_TYPE: "make_disc", CART_TYPE: "make_cart",
                                   BACK_TYPE: "make_back"}[kind]) for kind in kinds)
         folders = "\n".join(str(self.lb.media_folder(self.platform, kind)) for kind in kinds)
@@ -8846,6 +8890,12 @@ def selftest(report: str) -> int:
             check("box 3d seen", len(again.get("box3d", [])) == 1)
             check("skip existing", output_target(lb, "Test Platform", games[0], again,
                                                  {"region": "same", "existing": "skip", "format": "png"}) is None)
+            plain = Path(tmp) / "theirs.png"
+            Image.new("RGB", (20, 20), (90, 20, 20)).save(plain)
+            ours = str(target[0])
+            check("someone else's picture kept", made_here(ours) and others_picture([plain])
+                  and not others_picture([ours]) and batch_plan([{"box3d": [str(plain)]}, {"box3d": [ours]}], "replace",
+                                                               True, True) == (1, 1, 0, 1))
         templates = sorted(p for p in MODEL_DIR.glob("*.png")) if MODEL_DIR.is_dir() else []
         for path in templates:
             tpl = Image.open(path).convert("RGBA")

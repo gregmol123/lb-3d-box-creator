@@ -351,6 +351,20 @@ class SavingCovers(WebCase):
         self.assertTrue((boxes / "Unknown Thing-01.png").is_file())
         self.assertFalse((fronts / "Unknown Thing-01.png").exists())        # generic covers are not saved as fronts
 
+    def test_replace_keeps_theirs_unless_a_cover_is_found(self):
+        boxes = self.lb.media_folder(PLATFORM, m.OUT_TYPE)
+        boxes.mkdir(parents=True)
+        for title in ("Combat", "Unknown Thing"):                            # Box - 3D someone else made
+            Image.new("RGBA", (300, 420), (90, 20, 20, 255)).save(boxes / f"{title}-01.png")
+        self.lb.forget_indexes()
+        counts = m.batch_make(self.lb, PLATFORM, self.games[:2], self.prof, None, None,
+                              self.export(existing="replace"), threading.Event(), self.lb.root / "Backups", 400)
+        self.assertEqual((counts["covers"], counts["saved"], counts["kept"], counts["generic"], counts["errors"]),
+                         (1, 1, 1, 0, 0))
+        self.assertTrue(m.made_here(boxes / "Combat-01.png"))               # from the cover found on the web
+        self.assertFalse(m.made_here(boxes / "Unknown Thing-01.png"))       # none found: theirs stays
+        self.assertEqual(sorted(p.name for p in (self.lb.root / "Backups").rglob("*.png")), ["Combat-01.png"])
+
     def test_web_out_of_reach(self):
         old = m.libretro_names
 

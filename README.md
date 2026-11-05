@@ -21,7 +21,7 @@ the new pictures into its `Images` folders.
 | `lb_box3d_creator.py` | the whole program |
 | `box model\` | case templates, each with its corner file `.json` (a box3d profile): `AI *.png`, painted with this program's AI window, and the 3 of [box3d](https://github.com/RtaSistemas/box3d) (`box3d-mvs/arcade/dvd.png`, MIT, see `box3d-LICENSE.txt`); also built into the exe |
 | `build.bat` | builds `dist\LB3DBoxCreator-<version>.exe` (`--onefile --windowed --noupx`), copies `box model`, runs the exe's self-test |
-| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; back covers; logos cut from covers; Photoshop templates; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
+| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; back covers; what Replace keeps; logos cut from covers; Photoshop templates; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
 
 ## Using it
 
@@ -37,7 +37,8 @@ the new pictures into its `Images` folders.
    **▦ Gallery of the games in the list…** shows the Box - 3D (or Disc, Cart - 3D, Box - Back) pictures of the games in the list side by
    side, small / medium / large, in the list's order, so bad ones stand out. A click shows the game in the main
    window, a right click marks it as bad (red frame), a double click opens the picture. **Select the marked games in
-   the list** selects them in the main list: then choose *Replace* on the Save tab and make the selected games again.
+   the list** selects them in the main list: then choose *Replace* on the Save tab and make the selected games again
+   (games without a Box - Front keep pictures someone else made: see [Where the boxes go](#where-the-boxes-go)).
    The gallery follows the list (Show, Search, a new platform) and new pictures; its thumbnails are made in the
    background and kept in the cache folder (`thumbs`, the newest 20,000), so it opens fast the next time.
 3. **Box** tab: the case, chosen per platform.
@@ -210,7 +211,12 @@ LaunchBox names pictures: the title with `\ / : * ? " < > | '` turned into `_`, 
 `Tom Clancy_s Splinter Cell_ Blacklist-01.png`. By default the box goes into the same region subfolder its front
 came from (or always into the main folder). When a game already has a Box - 3D: **skip** it (default), **replace**
 the picture LaunchBox shows (the old file is copied to `<LaunchBox>\Backups\LB 3D Box Creator\<date time>\` first),
-or **add** it as the next number (`-02`…). PNG with transparency (or JPG on a chosen colour), transparent margins cut,
+or **add** it as the next number (`-02`…). *Replace* never puts a made-up picture in place of one someone else made
+(a scan, LaunchBox's download, another person's render). A game with no Box - Front keeps its Box - 3D and Disc,
+unless a cover is found on the web; it never gets a generic one in their place. A game with no Cart - Front keeps its
+Cart - 3D, and no cartridge is made from its cover in its place. The run's summary counts these games as **kept**.
+Pictures the program made itself are made again. When you save one game, the program asks before it replaces
+someone else's picture. PNG with transparency (or JPG on a chosen colour), transparent margins cut,
 height limited (1000 px by default). Files are written to `.tmp` and renamed, so a stopped run leaves no half
 pictures. The program never changes LaunchBox's XML files; LaunchBox shows the new pictures after a restart (or an
 image refresh).
