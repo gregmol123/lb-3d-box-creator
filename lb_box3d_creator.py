@@ -42,12 +42,16 @@ from tkinter import colorchooser, filedialog, messagebox, ttk
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps, ImageStat, ImageTk, PngImagePlugin
 
 APP_NAME = "LB 3D Box Creator"
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.9.0"
 CONFIG_PATH = Path.home() / ".lb_box3d_creator_config.json"
 LOG_PATH = Path.home() / ".lb_box3d_creator.log"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 BUNDLED_MODELS = Path(getattr(sys, "_MEIPASS", APP_DIR)) / "box model"
 MODEL_DIR = APP_DIR / "box model"
+# The user's own picture folders next to the program (each read with its subfolders, so a pack can keep its own):
+DISC_DIR = APP_DIR / "disc model"          # pictures of discs the cover is printed under (Disc tab)
+CART_DIR = APP_DIR / "cart model"          # cartridge pictures for games without a Cart - Front (Cart tab)
+LOGO_DIR = APP_DIR / "logo model"          # logos to put on boxes, age-rating badges among them (Text / Logo tab)
 BACKUP_DIR_NAME = "LB 3D Box Creator"
 GENERIC = "*generic*"
 MAX_ROWS = 5000
@@ -128,6 +132,24 @@ def ensure_model_dir() -> None:
                     shutil.copy2(src, MODEL_DIR / src.name)
         except OSError:
             MODEL_DIR = BUNDLED_MODELS
+
+
+def library(folder: Path, exts=None) -> list:
+    """The pictures of one of the program's folders and of its subfolders, as paths relative to it ("Pack/Name.png"):
+    the folder's own first, then the subfolders', each by name."""
+    exts = exts or IMAGE_EXTS
+    try:
+        found = [p for p in Path(folder).rglob("*") if p.suffix.lower() in exts and p.is_file()]
+    except OSError:
+        return []
+    names = [p.relative_to(folder).as_posix() for p in found]
+    return sorted(names, key=lambda n: ("/" in n, n.casefold()))
+
+
+def library_path(folder: Path, name: str) -> Path:
+    """A picture chosen from a folder's list (a path relative to it) or anywhere else (a full path)."""
+    p = Path(name)
+    return p if p.is_absolute() else Path(folder) / name
 
 
 def app_icon(size: int = 256):
@@ -757,7 +779,8 @@ def default_profile() -> dict:
         "upscale": False,          # small covers made sharper with an upscale model (AI window's server)
         "upscale_below": 800,      # ... when less than this many pixels high
         "upscale_model": "",       # "" = the best one the server has
-        "disc_kind": "auto",       # auto | cd | dvd | bluray | psx | gamecube | umd | picture
+        "disc_kind": "auto",       # auto | cd | dvd | bluray | psx | gamecube | umd | picture | template
+        "disc_template": "",       # template: a disc picture (in "disc model", or a full path) the cover goes under
         "disc_crop": "center",     # which square of the cover goes on the disc: top | center | bottom
         "disc_zoom": 1.0,
         "disc_logo": True,         # the game's Clear Logo on the disc
@@ -887,12 +910,42 @@ def logo_file(path):
     return hit or None
 
 
+_badges: dict = {}
+
+
+def rating_badge(rating: str):
+    """The badge of a game's age rating (LaunchBox's Rating: "T - Teen", "E10+ - Everyone 10+", "PEGI 16"…) from the
+    logo folder: a picture named after the board and the rating ("ESRB - T (Teen).png", "PEGI 16.png"), or None."""
+    first = " ".join((rating or "").split()).split(" - ")[0].upper()
+    words = re.findall(r"[A-Z0-9+]+", first)
+    if not words:
+        return None
+    if words[0] in ("ESRB", "PEGI", "CERO", "USK", "ACB", "OFLC"):
+        board, code = words[0], (words[1] if len(words) > 1 else "")
+    else:
+        board, code = "ESRB", words[0]                 # LaunchBox keeps ESRB ratings ("M - Mature")
+    if not code:
+        return None
+    now, key = time.monotonic(), str(LOGO_DIR)
+    with _logo_lock:
+        listing = _badges.get(key)
+    if listing is None or now - listing[0] > 60:
+        listing = (now, library(LOGO_DIR))
+        with _logo_lock:
+            _badges[key] = listing
+    for name in listing[1]:
+        tokens = re.findall(r"[A-Z0-9+]+", Path(name).stem.upper())
+        if len(tokens) >= 2 and tokens[0] == board and tokens[1] == code:
+            return logo_file(str(LOGO_DIR / name))
+    return None
+
+
 def draw_layers(canvas, layers, ctx, game_logo, marquee=None):
     """Texts and logos of one face, drawn on its art canvas (positions and sizes relative to the face).
 
     A logo layer may carry a slot box (box_w, box_h: fractions of the face, as box3d's spine logo slots); its size
     is then a percentage of that box. clearlogo uses the game's Clear Logo (else its Arcade - Marquee), marquee the
-    other way round.
+    other way round; rating, the badge of the game's age rating from the logo folder.
     """
     w, h = canvas.size
     for layer in layers:
@@ -908,11 +961,13 @@ def draw_layers(canvas, layers, ctx, game_logo, marquee=None):
                 pic = text_picture(text, font, hex_rgb(layer.get("color", "#ffffff")) + (255,), stroke,
                                    hex_rgb(layer.get("stroke_color", "#111111")) + (255,))
                 limit = 0.96
-            elif kind in ("logo", "clearlogo", "marquee"):
+            elif kind in ("logo", "clearlogo", "marquee", "rating"):
                 if kind == "clearlogo":
                     pic = game_logo or marquee
                 elif kind == "marquee":
                     pic = marquee or game_logo
+                elif kind == "rating":
+                    pic = rating_badge((ctx or {}).get("rating", ""))
                 else:
                     pic = logo_file(layer.get("path", ""))
                 if pic is None:
@@ -1540,7 +1595,7 @@ def disc_kind(profile: dict, platform: str = "") -> str:
     """The disc's kind: the one chosen, or one from the platform's name (PS2: DVD, PS3: Blu-ray, PS1: black disc,
     PSP: UMD…)."""
     kind = profile.get("disc_kind", "auto")
-    if kind in DISC_CHOICES:
+    if kind in DISC_CHOICES or kind == "template":
         return kind
     name = (platform or "").casefold()
     return next((k for word, k in DISC_AUTO if word in name), "cd")
@@ -1699,9 +1754,76 @@ def make_umd(art, profile: dict, ctx=None, logo=None, size=None):
     return img.convert("RGBa").resize((s, round(s * UMD_HEIGHT)), LANCZOS).convert("RGBA")
 
 
+def disc_picture(profile: dict):
+    """The disc picture chosen on the Disc tab (in "disc model", or a full path), kept loaded; None without one."""
+    name = profile.get("disc_template", "")
+    return picture_cached(str(library_path(DISC_DIR, name)), 2400) if name else None
+
+
+def disc_frame(pic):
+    """Where the disc of a disc picture is: (centre x, centre y, radius, hole radius) in its pixels. The disc is the
+    round of all that is not see-through; its hole, the see-through middle up to the first drawn pixel (a standard
+    hole when nothing is drawn round the middle)."""
+    alpha = pic.getchannel("A")
+    box = alpha.point([0] * 9 + [255] * 247).getbbox()
+    if not box:
+        return None
+    x0, y0, x1, y1 = box
+    cx, cy, r = (x0 + x1) / 2, (y0 + y1) / 2, max(x1 - x0, y1 - y0) / 2
+    if r < 8:
+        return None
+    px, reach = alpha.load(), []
+    for k in range(16):
+        t = 2 * math.pi * k / 16
+        d = 0.0
+        while d < r * 0.5:
+            x, y = round(cx + d * math.cos(t)), round(cy + d * math.sin(t))
+            if not (0 <= x < alpha.width and 0 <= y < alpha.height) or px[x, y] > 8:
+                break
+            d += 1.0
+        reach.append(d)
+    hole = sorted(reach)[len(reach) // 2]
+    if hole >= r * 0.5:
+        hole = r * DISC_KINDS["cd"][0]
+    return cx, cy, r, hole
+
+
+def make_disc_from_picture(art, pic, profile: dict, ctx=None, logo=None, size=None):
+    """A disc printed with `art` under a disc picture: the cover cut to the picture's round, from its hole out, the
+    game's logo and the line of text on it, and the picture's own rim, hub and print over it (the picture is
+    see-through where the print shows). None when the picture has no disc."""
+    frame = disc_frame(pic.convert("RGBA"))
+    if frame is None:
+        return None
+    cx, cy, r, hole = frame
+    w = max(2, round(2 * r))
+    over = Image.new("RGBA", (w, w), (0, 0, 0, 0))
+    over.paste(pic.convert("RGBA"), (round(r - cx), round(r - cy)))          # the disc in the middle of a square
+    disc = Image.new("RGBA", (w, w), (0, 0, 0, 0))
+    label = ImageChops.subtract(_circle(w, r * 0.995), _circle(w, hole))
+    disc.paste(_disc_art(art, w, profile.get("disc_crop", "center"), float(profile.get("disc_zoom", 1.0))), (0, 0),
+               label)
+    if logo is not None:
+        _put_logo(disc, logo, w * float(profile.get("disc_logo_size", 0.55)), r * 0.40, r - r * 0.64)
+    text = tidy_line(expand_text(profile.get("disc_text", ""), ctx or {}))
+    if text:
+        _ring_text(disc, text, r, hex_rgb(profile.get("disc_text_color", "#ffffff")),
+                   profile.get("disc_text_pos", "bottom"))
+    disc.alpha_composite(over)
+    s = max(200, int(size or profile.get("disc_size", 1000)))
+    return disc.convert("RGBa").resize((s, s), LANCZOS).convert("RGBA")
+
+
 def make_disc(art, profile: dict, ctx=None, logo=None, platform: str = "", size=None):
-    """A disc picture (RGBA, round, transparent hole) printed with `art`; a UMD picture for the PSP's kind."""
+    """A disc picture (RGBA, round, transparent hole) printed with `art`; a UMD picture for the PSP's kind; the cover
+    under a disc picture of "disc model" for the template kind (else the platform's own kind)."""
     kind = disc_kind(profile, platform)
+    if kind == "template":
+        pic = disc_picture(profile)
+        made = make_disc_from_picture(art, pic, profile, ctx, logo, size) if pic is not None else None
+        if made is not None:
+            return made
+        kind = disc_kind(dict(profile, disc_kind="auto"), platform)       # no picture to use: the platform's kind
     if kind == "umd":
         return make_umd(art, profile, ctx, logo, size)
     s = max(200, int(size or profile.get("disc_size", 1000)))
@@ -1938,7 +2060,12 @@ def find_cart_label(img, mode: str = "auto"):
     """Where the label is on a cartridge photo, as parts of the picture (left, top, right, bottom): the biggest patch
     inside the cartridge unlike its plastic, from a loose to a strict measure of "unlike" (shaded or black plastic
     joins a loose patch). A label is a solid rectangle: a patch filling little of its box, or covering nearly the
-    whole cartridge, is not one."""
+    whole cartridge, is not one. A picture with its label cut out (a see-through window) gives that window, a little
+    bigger, so the cover goes under its frame."""
+    window = cart_window(img)
+    if window is not None:
+        left, top, right, bottom = window
+        return max(0.0, left - 0.012), max(0.0, top - 0.012), min(1.0, right + 0.012), min(1.0, bottom + 0.012)
     cut, (bx0, by0, bx1, by1) = _cart_cut(img, mode)
     plastic = _cart_rim_colour(cut)
     small = cut.copy()
@@ -1964,28 +2091,77 @@ def find_cart_label(img, mode: str = "auto"):
     return (bx0 + fl * cw) / iw, (by0 + ft * ch) / ih, (bx0 + fr * cw) / iw, (by0 + fb * ch) / ih
 
 
-def cart_donor(path: str):
-    """The cartridge photo covers are put on, kept loaded (None when it cannot be read)."""
+def picture_cached(path, limit: int = 2000):
+    """A picture read once and kept while its file stays the same: a cartridge photo, a disc picture (None when it
+    cannot be read)."""
     if not path:
         return None
     try:
         st = os.stat(path)
     except OSError:
         return None
-    key = (path, st.st_mtime_ns, st.st_size)
+    key = (str(path), limit, st.st_mtime_ns, st.st_size)
     with _donor_lock:
         hit = _donors.get(key)
     if hit is None:
         try:
-            hit = load_picture(path, 2000)
+            hit = load_picture(path, limit).convert("RGBA")
         except (OSError, ValueError, Image.DecompressionBombError) as exc:
-            log_line(f"cartridge photo {path}: {exc}")
+            log_line(f"picture {path}: {exc}")
             return None
         with _donor_lock:
             if len(_donors) > 8:
                 _donors.clear()
             _donors[key] = hit
     return hit
+
+
+def cart_donor(path: str):
+    """The cartridge photo covers are put on, kept loaded (None when it cannot be read)."""
+    return picture_cached(path, 2000)
+
+
+def _enclosed(clear):
+    """The see-through pixels of a mask (255 = see-through) that its edge cannot reach: holes inside an outline."""
+    w, h = clear.size
+    pad = Image.new("L", (w + 2, h + 2), 255)
+    pad.paste(clear, (1, 1))
+    ImageDraw.floodfill(pad, (0, 0), 128)                  # all the see-through reached from outside
+    return pad.crop((1, 1, w + 1, h + 1)).point([0] * 255 + [255])
+
+
+def cart_window(img):
+    """A see-through label window inside a cartridge picture (one made to have the cover put under it): (left, top,
+    right, bottom) as parts of the picture, or None when it has none."""
+    small = img.convert("RGBA")
+    small.thumbnail((220, 220))
+    alpha = small.getchannel("A")
+    best, n = _biggest_patch(_enclosed(alpha.point([255] * 9 + [0] * 247)))
+    solid = ImageStat.Stat(alpha.point([0] * 129 + [255] * 127)).mean[0] / 255 * small.width * small.height
+    if best is None or n < 0.05 * (solid + n):
+        return None
+    return best
+
+
+_insides: dict = {}
+
+
+def _cart_inside(donor):
+    """The cartridge picture's outline, filled (its label window too), at its size; cached with the picture."""
+    hit = _insides.get(id(donor))
+    if hit is not None and hit[0] is donor:
+        return hit[1]
+    small = donor.getchannel("A")
+    scale = min(1.0, 500 / max(small.size))
+    if scale < 1:
+        small = small.resize((max(1, round(small.width * scale)), max(1, round(small.height * scale))), BILINEAR)
+    clear = small.point([255] * 9 + [0] * 247)
+    inside = ImageChops.lighter(ImageChops.invert(clear), _enclosed(clear))
+    inside = inside.resize(donor.size, BILINEAR).point([0] * 128 + [255] * 128)
+    if len(_insides) > 8:
+        _insides.clear()
+    _insides[id(donor)] = (donor, inside)
+    return inside
 
 
 def cart_cover_ready(profile: dict) -> bool:
@@ -2017,12 +2193,29 @@ def generic_cart_front(profile: dict, cover):
     else:                           # a label much wider than the cover (a Master System strip) gets its top: the title
         wide = (x1 - x0) / (y1 - y0) > 2 * cover.width / max(1, cover.height)
         art = ImageOps.fit(cover.convert("RGBA"), (x1 - x0, y1 - y0), LANCZOS, centering=(0.5, 0.0 if wide else 0.5))
-    out = donor.copy()
-    label = Image.new("RGBA", out.size, (0, 0, 0, 0))
+    label = Image.new("RGBA", donor.size, (0, 0, 0, 0))
     label.paste(art, (x0, y0))
+    if cart_window_cached(donor):                    # a cut-out label: the cover under the picture's frame
+        label.putalpha(ImageChops.multiply(label.getchannel("A"), _cart_inside(donor)))
+        label.alpha_composite(donor)
+        return label
+    out = donor.copy()
     label.putalpha(ImageChops.multiply(label.getchannel("A"), out.getchannel("A")))   # only on the cartridge
     out.alpha_composite(label)
     return out
+
+
+_windows: dict = {}
+
+
+def cart_window_cached(donor) -> bool:
+    """Has this cartridge picture a see-through label window (kept with the picture)?"""
+    hit = _windows.get(id(donor))
+    if hit is None or hit[0] is not donor:
+        if len(_windows) > 8:
+            _windows.clear()
+        hit = _windows[id(donor)] = (donor, cart_window(donor) is not None)
+    return hit[1]
 
 
 def _cart_rim_colour(cut):
@@ -4459,7 +4652,7 @@ TEXTS = {
     "help_back": "The Back tab sets the back cover · wheel: zoom · right button: pan · double click: fit",
     "help_logo": "Drag a frame round the game's logo on its cover, then save it on the Text / Logo tab · wheel: zoom · "
                  "right button: pan",
-    "logo_section": "Logo from the cover (games without a Clear Logo)",
+    "logo_cut_section": "Logo from the cover (games without a Clear Logo)",
     "logo_has": "This game has a Clear Logo.", "logo_none": "This game has no Clear Logo: pick it on its cover.",
     "logo_no_front": "This game has no Box - Front to pick a logo on.",
     "logo_pick": "▭ Pick the logo on the cover", "logo_save": "💾 Save as this game's Clear Logo",
@@ -4500,7 +4693,20 @@ TEXTS = {
     "cart_fit": "Cover on the label", "cart_fit_fill": "Fill (cut to fit)", "cart_fit_stretch": "Stretch",
     "cart_gen_note": "Choose one real photo of this platform's cartridge (a transparent background is best: a game's "
                      "Cart - Front, or any picture); its label is found by itself (the blue frame) and can be moved "
-                     "with the sliders. Each game without a Cart - Front then gets its Box - Front on that label.",
+                     "with the sliders. Each game without a Cart - Front then gets its Box - Front on that label. A "
+                     "cartridge picture with its label cut out (see-through) gets the cover under that window.",
+    "cart_library": "From “cart model”:",
+    "choose": "Choose…",
+    "disc_template": "Printed under a picture of a disc:",
+    "disc_template_note": "Pictures of discs, see-through where the cover shows (their rim, hub and print are drawn over "
+                          "it), go into “disc model” next to the program — subfolders too: {folder}",
+    "library_empty": "(nothing in the folder yet)",
+    "library_none": "Nothing to add yet: put pictures into {folder}",
+    "logo_lib_add": "＋ Add",
+    "logo_rating": "＋ Game's age rating badge (ESRB, from LaunchBox)",
+    "logo_lib_note": "Logos go into “logo model” next to the program — subfolders too: {folder}. A badge named after "
+                     "its rating (“ESRB - T (Teen).png”, “PEGI 16.png”) goes on the games with that rating.",
+    "layer_rating": "Game's age rating badge",
     "cart_from_cover": "made from the cover", "cart_donor_set": "Cartridge for the covers: {path}",
     "cart_use_none": "This game has no Cart - Front to use: pick a game that has one, or choose a picture.",
     "nothing_chosen": "Choose what to make (Box - 3D, Disc, Cart - 3D or Box - Back) at the top of the Save tab.",
@@ -4873,6 +5079,7 @@ class App:
         self.update_face_texts()
         self.refresh_layers()
         self.update_template_controls()
+        self.update_libraries()
         if hasattr(self, "gc_auto_label"):
             maker, name = platform_names(self.platform)
             self.gc_auto_label.configure(text=self.t("gc_auto", name=name or "—", maker=maker or "—"))
@@ -5450,6 +5657,15 @@ class App:
         self.button(row, self.t("slots_add"), self.add_spine_slots, "blue").pack(side="left", fill="x", expand=True,
                                                                                  padx=(6, 0))
         self.label(body, self.t("slots_note"), MUTED, 8, wraplength=self.px(370)).pack(fill="x", pady=(4, 0))
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(8, 0))
+        self.logo_lib_var = tk.StringVar()
+        self.logo_lib_combo = ttk.Combobox(row, textvariable=self.logo_lib_var, state="readonly", height=24)
+        self.logo_lib_combo.pack(side="left", fill="x", expand=True)
+        self.button(row, self.t("logo_lib_add"), self.add_library_logo).pack(side="left", padx=(6, 0))
+        self.button(body, self.t("logo_rating"), self.add_rating_badge).pack(fill="x", pady=(6, 0))
+        self.label(body, self.t("logo_lib_note", folder=LOGO_DIR), MUTED, 8,
+                   wraplength=self.px(370)).pack(fill="x", pady=(4, 0))
 
         body = self.section(parent, self.t("layers_section", face=self.t("face_" + self.face)))
         self.layers_body = body
@@ -5488,7 +5704,7 @@ class App:
         self.check(body, self.t("only_made"), var).pack(fill="x", pady=(6, 0))
         self.bind_var(var, "layer", "only_made", bool)
 
-        body = self.section(parent, self.t("logo_section"))
+        body = self.section(parent, self.t("logo_cut_section"))
         self.logo_state = self.label(body, "", SOFT, 8, wraplength=self.px(370))
         self.logo_state.pack(fill="x")
         row = tk.Frame(body, bg=PANEL2)
@@ -5510,7 +5726,17 @@ class App:
         self.disc_auto_radio.pack(fill="x")
         for kind in DISC_CHOICES:
             self.radio(body, self.t("disc_" + kind), var, kind).pack(fill="x")
+        self.radio(body, self.t("disc_template"), var, "template").pack(fill="x")
         self.bind_var(var, "profile", "disc_kind", str)
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(2, 0), padx=(self.px(20), 0))
+        self.disc_tpl_var = tk.StringVar()
+        self.disc_tpl_combo = ttk.Combobox(row, textvariable=self.disc_tpl_var, state="readonly", height=20)
+        self.disc_tpl_combo.pack(side="left", fill="x", expand=True)
+        self.disc_tpl_combo.bind("<<ComboboxSelected>>", lambda e: self.on_library_chosen("disc"))
+        self.button(row, self.t("choose"), self.choose_disc_picture).pack(side="left", padx=(6, 0))
+        self.label(body, self.t("disc_template_note", folder=DISC_DIR), MUTED, 8,
+                   wraplength=self.px(370)).pack(fill="x", pady=(2, 0))
 
         body = self.section(parent, self.t("disc_art_section"))
         row = tk.Frame(body, bg=PANEL2)
@@ -5594,6 +5820,13 @@ class App:
         self.button(row, self.t("cart_use_game"), self.use_game_cart).pack(side="left")
         self.button(row, self.t("cart_choose"), self.choose_cart_donor).pack(side="left", padx=(6, 0))
         self.button(row, self.t("cart_find_label"), self.find_label).pack(side="left", padx=(6, 0))
+        row = tk.Frame(body, bg=PANEL2)
+        row.pack(fill="x", pady=(4, 0))
+        self.label(row, self.t("cart_library")).pack(side="left")
+        self.cart_lib_var = tk.StringVar()
+        self.cart_lib_combo = ttk.Combobox(row, textvariable=self.cart_lib_var, state="readonly", height=16)
+        self.cart_lib_combo.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        self.cart_lib_combo.bind("<<ComboboxSelected>>", lambda e: self.on_library_chosen("cart"))
         self.cart_donor_view = tk.Label(body, bg=PANEL2, bd=0)
         self.cart_donor_view.pack(anchor="w", pady=(6, 0))
         for key in ("cart_label_l", "cart_label_t", "cart_label_r", "cart_label_b"):
@@ -6064,12 +6297,8 @@ class App:
 
     # ------------------------------------------------------------------------------------------- templates
     def template_names(self):
-        names = []
-        try:
-            names = sorted((p.name for p in MODEL_DIR.iterdir() if p.suffix.lower() in TEMPLATE_EXTS),
-                           key=str.casefold)
-        except OSError:
-            pass
+        """The templates of "box model" (its subfolders too: "Pack/Case.png"), then those loaded from elsewhere."""
+        names = library(MODEL_DIR, TEMPLATE_EXTS)
         for path in self.cfg.get("custom_templates", []):
             if path not in names and Path(path).is_file():
                 names.append(path)
@@ -6133,11 +6362,11 @@ class App:
         if not path:
             return
         p = Path(path)
-        try:
-            value = p.name if p.parent.resolve() == MODEL_DIR.resolve() else str(p)
-        except OSError:
+        try:                                   # one of "box model" (or of its subfolders): by its name there
+            value = p.resolve().relative_to(MODEL_DIR.resolve()).as_posix()
+        except (OSError, ValueError):
             value = str(p)
-        if value == str(p) and value not in self.cfg["custom_templates"]:
+        if Path(value).is_absolute() and value not in self.cfg["custom_templates"]:
             self.cfg["custom_templates"].append(value)
         self.remember()
         self.profile["template"] = value
@@ -6324,6 +6553,82 @@ class App:
             return
         self.set_cart_donor(path)
 
+    # ------------------------------------------------------------------------------------------- picture folders
+    @staticmethod
+    def library_label(name: str) -> str:
+        """A picture of a folder's list as shown: "Pack / Name" (a full path: its file name)."""
+        p = Path(name)
+        return p.name if p.is_absolute() else p.with_suffix("").as_posix().replace("/", " / ")
+
+    @staticmethod
+    def relative_to(folder: Path, path) -> str:
+        """`path` as a name in `folder`'s list ("" when it is not in that folder)."""
+        try:
+            return Path(path).resolve().relative_to(Path(folder).resolve()).as_posix()
+        except (OSError, ValueError):
+            return ""
+
+    def update_libraries(self):
+        """The lists of the "disc model", "cart model" and "logo model" folders, and what this platform uses."""
+        empty = [self.t("library_empty")]
+        if hasattr(self, "disc_tpl_combo"):
+            current = self.profile.get("disc_template", "")
+            self.disc_names = library(DISC_DIR) + ([current] if current and Path(current).is_absolute() else [])
+            self.disc_tpl_combo["values"] = [self.library_label(n) for n in self.disc_names] or empty
+            self.disc_tpl_var.set(self.library_label(current) if current else "")
+        if hasattr(self, "cart_lib_combo"):
+            self.cart_names = library(CART_DIR)
+            self.cart_lib_combo["values"] = [self.library_label(n) for n in self.cart_names] or empty
+            rel = self.relative_to(CART_DIR, self.profile.get("cart_donor", "")) if self.profile.get("cart_donor") else ""
+            self.cart_lib_var.set(self.library_label(rel) if rel in self.cart_names else "")
+        if hasattr(self, "logo_lib_combo"):
+            self.logo_names = library(LOGO_DIR)
+            values = [self.library_label(n) for n in self.logo_names]
+            self.logo_lib_combo["values"] = values or empty
+            if self.logo_lib_var.get() not in values:
+                self.logo_lib_var.set(values[0] if values else "")
+
+    def on_library_chosen(self, kind):
+        if kind == "disc":
+            i, names = self.disc_tpl_combo.current(), getattr(self, "disc_names", [])
+            if 0 <= i < len(names):
+                self.use_disc_picture(names[i])
+        elif kind == "cart":
+            i, names = self.cart_lib_combo.current(), getattr(self, "cart_names", [])
+            if 0 <= i < len(names):
+                self.set_cart_donor(str(CART_DIR / names[i]))
+
+    def use_disc_picture(self, value):
+        """Discs of this platform printed under a disc picture (a name in "disc model" or a full path)."""
+        self.remember()
+        self.profile.update(disc_template=value, disc_kind="template")
+        self.sync_controls()
+        self.schedule_save()
+        self.set_view("disc")
+        self.request_draw()
+
+    def choose_disc_picture(self):
+        path = filedialog.askopenfilename(parent=self.root, title=self.t("pick_picture"),
+                                          initialdir=str(DISC_DIR) if DISC_DIR.is_dir() else None,
+                                          filetypes=[(self.t("images"), PICTURE_TYPES), (self.t("all_files"), "*.*")])
+        if path:
+            self.use_disc_picture(self.relative_to(DISC_DIR, path) or str(Path(path)))
+
+    def add_library_logo(self):
+        i, names = self.logo_lib_combo.current(), getattr(self, "logo_names", [])
+        if not 0 <= i < len(names):
+            self.inform(self.t("library_none", folder=LOGO_DIR))
+            return
+        self.add_logo_path(str(LOGO_DIR / names[i]))
+
+    def add_rating_badge(self):
+        """The badge of each game's own age rating (LaunchBox's Rating), from the logo folder: low on the left of a
+        front, at the foot of a spine."""
+        if self.face == "spine":
+            self.add_layer({"kind": "rating", "size": 80.0, "rotation": 0.0, "x": 0.5, "y": 0.93, "opacity": 1.0})
+        else:
+            self.add_layer({"kind": "rating", "size": 16.0, "rotation": 0.0, "x": 0.1, "y": 0.86, "opacity": 1.0})
+
     def open_ai_dialog(self):
         if self.ai_dialog is not None and not self.ai_dialog.closed:
             self.ai_dialog.win.deiconify()
@@ -6333,8 +6638,8 @@ class App:
         self.ai_dialog = AIDialog(self)
 
     def use_template(self, value):
-        """Choose a template for this platform (a name in "box model" or a full path)."""
-        if value != Path(value).name and value not in self.cfg["custom_templates"]:
+        """Choose a template for this platform (a name in "box model", maybe in a subfolder, or a full path)."""
+        if Path(value).is_absolute() and value not in self.cfg["custom_templates"]:
             self.cfg["custom_templates"].append(value)
         self.remember()
         self.profile["template"] = value
@@ -6509,6 +6814,8 @@ class App:
                 lst.insert("end", prefix + self.t("layer_logo", v=Path(ly.get("path", "")).name))
             elif ly.get("kind") == "marquee":
                 lst.insert("end", prefix + self.t("layer_marquee"))
+            elif ly.get("kind") == "rating":
+                lst.insert("end", prefix + self.t("layer_rating"))
             else:
                 lst.insert("end", prefix + self.t("layer_clearlogo"))
         if not layers:
@@ -6571,10 +6878,13 @@ class App:
                                           filetypes=[(self.t("images"), "*.png *.webp *.jpg *.jpeg *.bmp *.gif"),
                                                      (self.t("all_files"), "*.*")])
         if path:
-            spine = self.face == "spine"
-            self.add_layer({"kind": "logo", "path": path, "size": 85.0 if spine else 40.0,
-                            "rotation": -90.0 if spine else 0.0, "x": 0.5, "y": 0.12 if not spine else 0.85,
-                            "opacity": 1.0})
+            self.add_logo_path(path)
+
+    def add_logo_path(self, path):
+        spine = self.face == "spine"
+        self.add_layer({"kind": "logo", "path": str(path), "size": 85.0 if spine else 40.0,
+                        "rotation": -90.0 if spine else 0.0, "x": 0.5, "y": 0.12 if not spine else 0.85,
+                        "opacity": 1.0})
 
     def add_game_logo(self, kind="clearlogo"):
         spine = self.face == "spine"
@@ -8944,6 +9254,19 @@ def selftest(report: str) -> int:
                                                            "cart_label_b"), label))), front)
             check("cartridge from a cover", on_label is not None and on_label.size == shell.size
                   and abs(label[0] - 90 / 400) < 0.03, f"label {tuple(round(v, 3) for v in label)}")
+        framed = Image.new("RGBA", (300, 340), (0, 0, 0, 0))            # a cartridge picture with its label cut out
+        ImageDraw.Draw(framed).rectangle((10, 10, 289, 329), fill=(40, 40, 44, 255))
+        framed.paste((0, 0, 0, 0), (50, 60, 250, 260))
+        window = cart_window(framed)
+        check("cartridge with a cut-out label", window is not None and abs(window[0] - 50 / 300) < 0.02,
+              str(window and tuple(round(v, 3) for v in window)))
+        ring = Image.new("RGBA", (400, 400), (0, 0, 0, 0))               # a disc picture: rim and hub drawn
+        ImageDraw.Draw(ring).ellipse((4, 4, 395, 395), outline=(200, 200, 205, 255), width=6)
+        ImageDraw.Draw(ring).ellipse((172, 172, 227, 227), outline=(200, 200, 205, 255), width=4)
+        on_picture = make_disc_from_picture(front, ring, default_profile(), size=300)
+        check("disc from a picture", on_picture is not None and on_picture.size == (300, 300)
+              and on_picture.getpixel((150, 150))[3] == 0 and on_picture.getpixel((150, 60))[3] == 255,
+              str(disc_frame(ring)))
         back = render_back(default_profile(), Pictures(front=front.convert("RGBA"), ctx={
             "title": "Combat", "notes": "Tanks, biplanes and jets in 27 games.", "publisher": "Atari", "year": "1977"}),
             700)

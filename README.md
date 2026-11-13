@@ -21,7 +21,7 @@ the new pictures into its `Images` folders.
 | `lb_box3d_creator.py` | the whole program |
 | `box model\` | case templates, each with its corner file `.json` (a box3d profile): `AI *.png`, painted with this program's AI window, and the 3 of [box3d](https://github.com/RtaSistemas/box3d) (`box3d-mvs/arcade/dvd.png`, MIT, see `box3d-LICENSE.txt`); also built into the exe |
 | `build.bat` | builds `dist\LB3DBoxCreator-<version>.exe` (`--onefile --windowed --noupx`), copies `box model`, runs the exe's self-test |
-| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; back covers; what Replace keeps; logos cut from covers; Photoshop templates; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
+| `tests\` | `python -m unittest discover -s tests` (engine with a made-up LaunchBox folder; generic covers; discs; cartridges; back covers; what Replace keeps; picture folders (templates in subfolders, discs under a picture, cut-out cartridge labels, rating badges); logos cut from covers; Photoshop templates; scan edges and the gallery; covers from a made-up libretro / Steam server; AI templates and upscaling with made-up Forge/A1111 and ComfyUI servers; the window tests need a desktop) |
 
 ## Using it
 
@@ -45,7 +45,8 @@ the new pictures into its `Images` folders.
    * *Box drawn in perspective* (no template): a cardboard box or a plastic keep case (rim colour; presets for
      Xbox 360, PS4, PS2, Wii, Switch…), turn, perspective, thickness (taken from the spine picture's shape when there
      is one). Fits any platform.
-   * A template from `box model` (or **Load template…**, any PNG — or Photoshop `.psd`, read through its merged
+   * A template from `box model` — subfolders too, so a pack of templates can keep its own folder (shown as
+     *Pack / Case*) — (or **Load template…**, any PNG — or Photoshop `.psd`, read through its merged
      picture; one saved without it, Photoshop's *Maximize compatibility* off, is refused with a message instead of
      showing blank — of an empty case): the cover and the spine are
      mapped onto the template's front and spine by their four corners. The shipped templates bring their corners;
@@ -122,6 +123,10 @@ the new pictures into its `Images` folders.
    Clear Logo** saves it into LaunchBox's `Clear Logo` folder (`<title>-01.png`, a new file, never over one). From
    then on the game's made-up spine, its disc and its back cover use it, and so does LaunchBox.
    Text layers also take `{players}`, `{rating}` and `{notes}`.
+   **Logos from the `logo model` folder** (next to the program, subfolders too): pick one in the list and **＋ Add**.
+   **＋ Game's age rating badge** puts on each game the badge of its own rating from LaunchBox (*T - Teen*,
+   *E10+ - Everyone 10+*…): the picture in `logo model` named after the board and the rating, like
+   `ESRB - T (Teen).png` or `PEGI 16.png`; games without a rating, or without a badge for it, get none.
 6. **Disc** tab: the game's disc, from its Box - Front: the kind (*from the platform* by default: PlayStation's black
    disc printed to the hub, DVD for PS2 / Xbox / Wii, Blu-ray for PS3 / PS4 / Xbox One / Wii U, the small GameCube
    disc, the PSP's **UMD** — its white shell, round at the top, with the round label and its white middle, as on real
@@ -130,6 +135,10 @@ the new pictures into its `Images` folders.
    (`{title} · © {year} {publisher}`…; fields a game lacks are left out with their separators) at the top or bottom in
    a colour, the disc's size (1000 px; a UMD is that wide and 2 % higher). A game with no Box - Front gets a disc from
    its generic cover. **Disc** in the preview's view buttons shows it.
+   **Printed under a picture of a disc**: a disc picture from the `disc model` folder next to the program (subfolders
+   too), or **Choose…** any. It is see-through where the cover shows; the cover is cut to its round, from its hole
+   out (the see-through middle up to the first drawn pixel), and the picture's own rim, hub and print go over it,
+   with the logo and the line of text. When the picture is missing, the platform's own disc is drawn.
 7. **Cart** tab: the game's cartridge in 3D (LaunchBox's *Cart - 3D*), from its **Cart - Front**, which in LaunchBox is
    a photo of the whole cartridge. The photo is the front, turned in perspective (**Turn**, **Seen from above**,
    **Perspective**), and a side wall follows the cartridge's own outline in the colour of its plastic, on the left or
@@ -148,6 +157,9 @@ the new pictures into its `Images` folders.
    NES, SNES, Mega Drive / Genesis, N64, Game Boy, Game Boy Color, GBA, Atari 2600, Master System and DS photos. Parts
    of the photo outside the label stay as they are (the Atari 2600's end label, text round a Genesis label): move the
    sliders to cover them. The info line says "Cart - Front: made from the cover".
+   **From “cart model”** lists cartridge pictures kept next to the program (subfolders too). A cartridge picture whose
+   label is cut out (a see-through window inside the cartridge) gets the cover **under** that window, its frame drawn
+   over the cover's edge.
 8. **Back** tab: a **Box - Back** for games that have none, in the generic covers' look (their ground and colours,
    Artwork tab): the game's Clear Logo (else its title) at the top, up to four screenshots (Gameplay, else Game Title
    / Game Select; a picture LaunchBox holds twice is shown once), the game's description from LaunchBox in a panel (as
@@ -229,6 +241,14 @@ from scans.
 
 Pictures are taken as LaunchBox would: the main folder first, then the game's region folder, then others; a
 Box - Spine only from the front's region folder (can be switched off), Box - Full checked against the front.
+
+## Picture folders next to the program
+
+Your own pictures go into four folders next to `LB3DBoxCreator-<version>.exe` (each read with its subfolders, so a
+pack can keep its own folder): `box model` (case templates; the shipped ones are copied there), `disc model` (discs
+the cover is printed under, Disc tab), `cart model` (cartridges for games without a Cart - Front, Cart tab) and
+`logo model` (logos and age-rating badges, Text / Logo tab). Pictures you got with other programs stay on your PC:
+the program only reads them.
 
 ## Settings
 
